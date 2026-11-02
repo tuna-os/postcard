@@ -7,6 +7,7 @@ from gettext import gettext as _
 from .graph_session import GraphError
 from .imap_session import ImapError, UidValidityError
 from .smtp_session import SmtpError
+from .tuta_session import TutaError
 
 # Substrings (lowercased) that mean the server rejected the credentials.
 _AUTH_HINTS = (
@@ -23,8 +24,8 @@ _AUTH_HINTS = (
 # Only that one distinction is acted on -- a rejected password is the failure
 # no Retry button can fix. Order matters: most socket errors subclass OSError,
 # so the specific cases are checked first.
-def classify(exc: Exception, host: str) -> tuple[bool, str]:  # noqa: PLR0911
-    # noqa PLR0911: a dispatch table. One return per exception category is the
+def classify(exc: Exception, host: str) -> tuple[bool, str]:  # noqa: PLR0911, C901
+    # noqa PLR0911/C901: a dispatch table. One return per exception category is the
     # clearest shape here; collapsing them into a dict costs readability.
     if isinstance(exc, ssl.SSLError):
         return False, _("Couldn't establish a secure connection to {host}.").format(
@@ -40,6 +41,8 @@ def classify(exc: Exception, host: str) -> tuple[bool, str]:  # noqa: PLR0911
         )
     if isinstance(exc, TimeoutError):
         return False, _("Connecting to {host} timed out.").format(host=host)
+    if isinstance(exc, TutaError):
+        return _classify_tuta(exc)
     if isinstance(exc, GraphError):
         return _classify_graph(exc)
     if isinstance(exc, UidValidityError):
@@ -89,3 +92,21 @@ _URL_PATTERN = re.compile(r"https?://[^\s<>]*[^\s<>.,;:)\]]")
 def linkify(text: str) -> str:
     escaped = html.escape(text)
     return _URL_PATTERN.sub(lambda m: f'<a href="{m.group()}">{m.group()}</a>', escaped)
+
+
+def _classify_tuta(exc: TutaError) -> tuple[bool, str]:
+    if exc.code == "helper_missing":
+        return False, _("This build does not include the experimental Tuta helper.")
+    if exc.code in ("login_failed", "resume_failed"):
+        return False, _(
+            "Tuta sign-in could not be completed. Check the session and client version."
+        )
+    if exc.code in ("second_factor_required", "invalid_totp", "second_factor_failed"):
+        return True, _("Tuta requires a valid second-factor code.")
+    if exc.code == "unsupported_second_factor":
+        return True, _("This Tuta second-factor method is not supported yet.")
+    if exc.code == "unsupported_operation":
+        return False, _(
+            "This operation is not supported by the experimental Tuta backend yet."
+        )
+    return False, _("The experimental Tuta operation failed. Try again later.")

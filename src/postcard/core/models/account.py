@@ -14,6 +14,7 @@ MAX_PORT = 65535
 # and Google; Microsoft 365 hands out a token that only opens the Graph API.
 PROTOCOL_IMAP = "imap"
 PROTOCOL_GRAPH = "graph"
+PROTOCOL_TUTA = "tuta"
 
 # What a Graph account stores in the host/port columns, which predate it and are
 # NOT NULL. Error messages name the host, so it is the real one.
@@ -70,6 +71,10 @@ class Account(GObject.Object):
         # where its credentials live instead of the keyring.
         self.goa_id: str = goa_id
         self.protocol: str = protocol
+
+    @property
+    def is_tuta(self) -> bool:
+        return self.protocol == PROTOCOL_TUTA
 
     @property
     def is_graph(self) -> bool:

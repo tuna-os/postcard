@@ -162,3 +162,9 @@ If Postcard is useful to you, a ⭐ helps other people find it.
 ## License
 
 [GPL-3.0-or-later](COPYING).
+
+## Tuna OS provider work
+
+See the [provider roadmap](ROADMAP.md) for experimental Tuta-native work and
+planned Proton Mail support. These providers are not available in released
+builds yet. Developer notes live in [native/tuta](native/tuta/README.md).

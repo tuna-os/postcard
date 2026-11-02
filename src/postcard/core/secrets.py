@@ -10,6 +10,7 @@ from gi.repository import Secret
 from . import goa
 from .models.account import Account
 from .net.auth import Credential
+from .net.tuta_session import MECHANISM_TUTA
 
 _SCHEMA = Secret.Schema.new(
     "in.gxanshu.postcard.Account",
@@ -47,4 +48,7 @@ def credential_for(account: Account) -> Credential | None:
         return goa.credential(account.goa_id)
 
     password = lookup_password(account.id)
-    return Credential(account.login_name, password) if password else None
+    if not password:
+        return None
+    mechanism = MECHANISM_TUTA if account.is_tuta else "login"
+    return Credential(account.login_name, password, mechanism)

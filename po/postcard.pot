@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-18 09:24+0530\n"
+"POT-Creation-Date: 2026-11-02 10:19-0600\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -264,31 +264,31 @@ msgstr ""
 msgid "Couldn't send: {msg}. Saved to Outbox."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:29
+#: src/postcard/core/net/errors.py:29 src/postcard/core/net/errors.py:31
 #, python-brace-format
 msgid "Couldn't establish a secure connection to {host}."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:34
+#: src/postcard/core/net/errors.py:34 src/postcard/core/net/errors.py:36
 #, python-brace-format
 msgid "Can't find {host}. Check the server address or your connection."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:37
+#: src/postcard/core/net/errors.py:37 src/postcard/core/net/errors.py:39
 #, python-brace-format
 msgid "{host} refused the connection. Check the port."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:41
+#: src/postcard/core/net/errors.py:41 src/postcard/core/net/errors.py:43
 #, python-brace-format
 msgid "Connecting to {host} timed out."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:45
+#: src/postcard/core/net/errors.py:45 src/postcard/core/net/errors.py:53
 msgid "Sign-in failed. Check the account password."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:48
+#: src/postcard/core/net/errors.py:48 src/postcard/core/net/errors.py:56
 msgid "Couldn't reach the mail server. Check your connection."
 msgstr ""
 
@@ -1000,4 +1000,49 @@ msgstr ""
 #: src/ui/shortcuts-dialog.blp:76
 msgctxt "shortcut window"
 msgid "Delete"
+msgstr ""
+
+#: src/postcard/core/net/errors.py:49
+msgid "This folder changed on the server. Refresh and try again."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:71
+msgid ""
+"Microsoft rejected the sign-in. Sign in again under Online Accounts in "
+"Settings."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:76
+msgid ""
+"Microsoft refused access to this mailbox. Your organization may need to "
+"allow GNOME Online Accounts to read mail."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:80
+msgid "Microsoft is busy right now. Try again in a moment."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:99
+msgid "This build does not include the experimental Tuta helper."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:102
+msgid ""
+"Tuta sign-in could not be completed. Check the session and client version."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:105
+msgid "Tuta requires a valid second-factor code."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:107
+msgid "This Tuta second-factor method is not supported yet."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:110
+msgid "This operation is not supported by the experimental Tuta backend yet."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:112
+msgid "The experimental Tuta operation failed. Try again later."
 msgstr ""
