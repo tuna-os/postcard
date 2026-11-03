@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-03 13:13+0000\n"
+"POT-Creation-Date: 2026-11-03 13:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -216,11 +216,25 @@ msgstr ""
 msgid "Remove Account"
 msgstr ""
 
-#: src/postcard/application.py:50
+#: src/postcard/application.py:61
 msgid "Start in the background without showing a window"
 msgstr ""
 
-#: src/postcard/application.py:139
+#: src/postcard/application.py:119
+msgid "Could Not Open the Mail Cache"
+msgstr ""
+
+#. Auth failures aren't worth a Retry button (same password); everything
+#. else is a transient connection problem the user can retry.
+#: src/postcard/application.py:121 src/postcard/window.py:2843
+msgid "Retry"
+msgstr ""
+
+#: src/postcard/application.py:122 src/postcard/tray.py:113
+msgid "Quit"
+msgstr ""
+
+#: src/postcard/application.py:194
 msgid "translator-credits"
 msgstr ""
 
@@ -265,88 +279,104 @@ msgstr ""
 msgid "Couldn't send: {msg}. Saved to Outbox."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:33
+#: src/postcard/core/net/errors.py:37
 #, python-brace-format
 msgid "Couldn't establish a secure connection to {host}."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:38
+#: src/postcard/core/net/errors.py:42
 #, python-brace-format
 msgid "Can't find {host}. Check the server address or your connection."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:41
+#: src/postcard/core/net/errors.py:45
 #, python-brace-format
 msgid "{host} refused the connection. Check the port."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:45
+#: src/postcard/core/net/errors.py:49
 #, python-brace-format
 msgid "Connecting to {host} timed out."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:49
+#: src/postcard/core/net/errors.py:53
 msgid "Proton Mail is not supported in this build yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:55
+#: src/postcard/core/net/errors.py:61
 msgid "This folder changed on the server. Refresh and try again."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:59
+#: src/postcard/core/net/errors.py:65
 msgid "Sign-in failed. Check the account password."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:62
+#: src/postcard/core/net/errors.py:68
 msgid "Couldn't reach the mail server. Check your connection."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:77
+#: src/postcard/core/net/errors.py:80
+msgid "Could not get the mail cache key from the keyring."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:82
+msgid "This build cannot decrypt the mail cache."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:84
+msgid "The stored key does not unlock the mail cache."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:85
+msgid "The old mail cache could not be encrypted."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:93
 msgid ""
 "Microsoft rejected the sign-in. Sign in again under Online Accounts in "
 "Settings."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:82
+#: src/postcard/core/net/errors.py:98
 msgid ""
 "Microsoft refused access to this mailbox. Your organization may need to "
 "allow GNOME Online Accounts to read mail."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:86
+#: src/postcard/core/net/errors.py:102
 msgid "Microsoft is busy right now. Try again in a moment."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:106
+#: src/postcard/core/net/errors.py:122
 msgid "The Microsoft sign-in expired. Reconnect the account to continue."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:108
+#: src/postcard/core/net/errors.py:124
 msgid "The Microsoft sign-in could not be completed. Try again later."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:113
+#: src/postcard/core/net/errors.py:129
 msgid "This build does not include the experimental Tuta helper."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:116
+#: src/postcard/core/net/errors.py:132
 msgid ""
 "Tuta sign-in could not be completed. Check the session and client version."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:119
+#: src/postcard/core/net/errors.py:135
 msgid "Tuta requires a valid second-factor code."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:121
+#: src/postcard/core/net/errors.py:137
 msgid "This Tuta second-factor method is not supported yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:124
+#: src/postcard/core/net/errors.py:140
 msgid "This operation is not supported by the experimental Tuta backend yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:126
+#: src/postcard/core/net/errors.py:142
 msgid "The experimental Tuta operation failed. Try again later."
 msgstr ""
 
@@ -469,10 +499,6 @@ msgstr ""
 
 #: src/postcard/tray.py:112 src/ui/main-window.blp:133
 msgid "Refresh Inbox"
-msgstr ""
-
-#: src/postcard/tray.py:113
-msgid "Quit"
 msgstr ""
 
 #: src/postcard/window.py:105
@@ -642,12 +668,6 @@ msgstr ""
 #: src/postcard/window.py:2835
 #, python-brace-format
 msgid "{account}: {reason}"
-msgstr ""
-
-#. Auth failures aren't worth a Retry button (same password); everything
-#. else is a transient connection problem the user can retry.
-#: src/postcard/window.py:2843
-msgid "Retry"
 msgstr ""
 
 #: src/postcard/window.py:2852

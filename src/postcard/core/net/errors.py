@@ -4,6 +4,7 @@ import socket
 import ssl
 from gettext import gettext as _
 
+from ..store.database import CacheError
 from .graph_session import GraphError
 from .imap_session import ImapError, UidValidityError
 from .ms_oauth import MsOAuthError
@@ -26,9 +27,12 @@ _AUTH_HINTS = (
 # Only that one distinction is acted on -- a rejected password is the failure
 # no Retry button can fix. Order matters: most socket errors subclass OSError,
 # so the specific cases are checked first.
-def classify(exc: Exception, host: str) -> tuple[bool, str]:  # noqa: PLR0911, C901
-    # noqa PLR0911/C901: a dispatch table. One return per exception category is the
-    # clearest shape here; collapsing them into a dict costs readability.
+def classify(  # noqa: PLR0911, PLR0912, C901
+    exc: Exception, host: str
+) -> tuple[bool, str]:
+    # noqa PLR0911/PLR0912/C901: a dispatch table. One return per exception
+    # category is the clearest shape here; collapsing them into a dict costs
+    # readability.
     if isinstance(exc, ssl.SSLError):
         return False, _("Couldn't establish a secure connection to {host}.").format(
             host=host
@@ -49,6 +53,8 @@ def classify(exc: Exception, host: str) -> tuple[bool, str]:  # noqa: PLR0911, C
         return False, _("Proton Mail is not supported in this build yet.")
     if isinstance(exc, MsOAuthError):
         return _classify_ms_oauth(exc)
+    if isinstance(exc, CacheError):
+        return _classify_cache(exc)
     if isinstance(exc, GraphError):
         return _classify_graph(exc)
     if isinstance(exc, UidValidityError):
@@ -67,6 +73,16 @@ def classify(exc: Exception, host: str) -> tuple[bool, str]:  # noqa: PLR0911, C
 _GRAPH_UNAUTHORIZED = 401
 _GRAPH_FORBIDDEN = 403
 _GRAPH_BUSY = frozenset({429, 503, 504})
+
+
+def _classify_cache(exc: CacheError) -> tuple[bool, str]:
+    if exc.code in ("key_missing", "key_unavailable"):
+        return False, _("Could not get the mail cache key from the keyring.")
+    if exc.code == "crypto_unavailable":
+        return False, _("This build cannot decrypt the mail cache.")
+    if exc.code == "unlock_failed":
+        return False, _("The stored key does not unlock the mail cache.")
+    return False, _("The old mail cache could not be encrypted.")
 
 
 def _classify_graph(exc: GraphError) -> tuple[bool, str]:

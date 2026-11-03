@@ -1,18 +1,29 @@
 import os
+import sqlite3
 import stat
 from datetime import datetime
 
 import pytest
 
+import postcard.core.store.database as database_module
 from postcard.core.models.email import Email
 from postcard.core.models.message_header import MessageHeader
 from postcard.core.store.database import (
+    MIGRATIONS,
+    CacheError,
     Database,
     _arrival_key,
     _fts_query,
     _sent_key,
     restrict_cache_permissions,
 )
+
+needs_sqlcipher = pytest.mark.skipif(
+    database_module._sqlcipher is None, reason="sqlcipher3 is not installed"
+)
+
+_CACHE_KEY = bytes(range(32))
+_OTHER_KEY = bytes(reversed(range(32)))
 
 
 @pytest.fixture
@@ -699,24 +710,26 @@ def mode_of(path):
     return stat.S_IMODE(os.stat(path).st_mode)
 
 
+@needs_sqlcipher
 def test_opening_a_database_leaves_it_owner_only(tmp_path):
     path = str(tmp_path / "postcard.db")
     os.chmod(tmp_path, 0o755)
 
-    database = Database(path)
+    database = Database(path, key=_CACHE_KEY)
     database.close()
 
     assert mode_of(tmp_path) == 0o700
     assert mode_of(path) == 0o600
 
 
+@needs_sqlcipher
 def test_a_pre_existing_world_readable_cache_is_tightened(tmp_path):
     path = str(tmp_path / "postcard.db")
-    Database(path).close()
+    Database(path, key=_CACHE_KEY).close()
     os.chmod(tmp_path, 0o755)
     os.chmod(path, 0o644)
 
-    Database(path).close()
+    Database(path, key=_CACHE_KEY).close()
 
     assert mode_of(tmp_path) == 0o700
     assert mode_of(path) == 0o600
@@ -744,3 +757,87 @@ def test_missing_sidecars_are_normal_not_an_error(tmp_path, caplog):
     restrict_cache_permissions(str(tmp_path / "postcard.db"))
 
     assert "could not restrict" not in caplog.text
+
+
+# --- encryption at rest -----------------------------------------------------
+
+
+def test_a_file_database_without_a_key_fails_closed(tmp_path):
+    with pytest.raises(CacheError) as caught:
+        Database(str(tmp_path / "postcard.db"))
+    assert caught.value.code == "key_missing"
+
+
+def test_a_missing_binding_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setattr(database_module, "_sqlcipher", None)
+    with pytest.raises(CacheError) as caught:
+        Database(str(tmp_path / "postcard.db"), key=_CACHE_KEY)
+    assert caught.value.code == "crypto_unavailable"
+
+
+@needs_sqlcipher
+def test_a_new_file_database_is_encrypted_at_rest(tmp_path):
+    path = tmp_path / "postcard.db"
+    database = Database(str(path), key=_CACHE_KEY)
+    database.save_account(
+        "me@example.com", "Me", "imap.example.com", 993, "smtp.example.com", 587
+    )
+    database.close()
+
+    stored = path.read_bytes()
+    assert not stored.startswith(b"SQLite format 3\x00")
+    assert b"me@example.com" not in stored
+
+    reopened = Database(str(path), key=_CACHE_KEY)
+    assert reopened.accounts()[0].email == "me@example.com"
+    reopened.close()
+
+
+@needs_sqlcipher
+def test_a_wrong_key_opens_nothing(tmp_path):
+    path = str(tmp_path / "postcard.db")
+    Database(path, key=_CACHE_KEY).close()
+
+    with pytest.raises(CacheError) as caught:
+        Database(path, key=_OTHER_KEY)
+    assert caught.value.code == "unlock_failed"
+
+
+@needs_sqlcipher
+def test_a_plaintext_cache_migrates_in_place(tmp_path):
+    path = tmp_path / "postcard.db"
+    plain = sqlite3.connect(str(path))
+    plain.execute("CREATE TABLE t(x)")
+    plain.execute("INSERT INTO t VALUES ('secret')")
+    plain.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
+    plain.commit()
+    plain.close()
+
+    database = Database(str(path), key=_CACHE_KEY)
+
+    assert not path.read_bytes().startswith(b"SQLite format 3\x00")
+    assert b"secret" not in path.read_bytes()
+    assert database._conn.execute("PRAGMA user_version").fetchone()[0] == len(
+        MIGRATIONS
+    )
+    assert [row[0] for row in database._conn.execute("SELECT x FROM t")] == ["secret"]
+    database.close()
+
+    assert not (tmp_path / "postcard.db.migrating").exists()
+    reopened = Database(str(path), key=_CACHE_KEY)
+    reopened.close()
+    with pytest.raises(sqlite3.DatabaseError):
+        sqlite3.connect(str(path)).execute("SELECT * FROM t").fetchall()
+
+
+@needs_sqlcipher
+def test_migration_leaves_a_broken_cache_untouched(tmp_path):
+    path = tmp_path / "postcard.db"
+    path.write_bytes(b"SQLite format 3\x00" + bytes(100))
+
+    with pytest.raises(CacheError) as caught:
+        Database(str(path), key=_CACHE_KEY)
+
+    assert caught.value.code == "migration_failed"
+    assert path.read_bytes() == b"SQLite format 3\x00" + bytes(100)
+    assert not (tmp_path / "postcard.db.migrating").exists()

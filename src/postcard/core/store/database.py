@@ -3,10 +3,16 @@ import math
 import os
 import sqlite3
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import datetime
 from email.parser import BytesHeaderParser
 
 from gi.repository import GLib
+
+try:
+    from sqlcipher3 import dbapi2 as _sqlcipher
+except ImportError:
+    _sqlcipher = None
 
 from .. import threader
 from ..models.account import (
@@ -21,6 +27,23 @@ from ..models.folder import Folder
 from ..models.message_header import MessageHeader
 
 logger = logging.getLogger(__name__)
+
+
+class CacheError(Exception):
+    """The mail cache cannot be opened safely.
+
+    Codes come from a fixed vocabulary: keyring and database failures must
+    never surface paths, keys, or SQL in user-facing text.
+    """
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__("The mail cache could not be opened.")
+
+
+# The first bytes of every plaintext SQLite file. Anything else on disk is
+# either already encrypted or not a database at all.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
 
 # Every column _email_from_row reads
 _EMAIL_COLUMNS = """
@@ -107,6 +130,83 @@ MIGRATIONS = [
 ]
 
 
+def _is_plaintext(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(len(_SQLITE_MAGIC)) == _SQLITE_MAGIC
+    except FileNotFoundError:
+        return False
+
+
+def _remove_quietly(path: str) -> None:
+    with suppress(FileNotFoundError):
+        os.remove(path)
+
+
+def _migrate_plaintext_to_encrypted(path: str, key: bytes) -> None:
+    """Encrypt a pre-encryption cache via staging file plus atomic replace.
+
+    The original is only read; any failure leaves it untouched and raises.
+    Stale sidecars hold plaintext too, so they are removed either way.
+    """
+    if _sqlcipher is None:
+        raise CacheError("crypto_unavailable")
+    staging = path + ".migrating"
+    sidecars = ("-wal", "-shm", "-journal")
+    for leftover in [staging, *(staging + suffix for suffix in sidecars)]:
+        _remove_quietly(leftover)
+    try:
+        with sqlite3.connect(path) as plain:
+            version = plain.execute("PRAGMA user_version").fetchone()[0]
+        source = _sqlcipher.connect(path)
+        try:
+            quoted = "'" + staging.replace("'", "''") + "'"
+            source.execute(
+                f"ATTACH DATABASE {quoted} AS encrypted KEY \"x'{key.hex()}'\""
+            )
+            source.execute("SELECT sqlcipher_export('encrypted')")
+            source.execute(f"PRAGMA encrypted.user_version = {version:d}")
+            source.execute("DETACH DATABASE encrypted")
+        finally:
+            source.close()
+        _verify_encrypted(staging, key, version)
+        os.replace(staging, path)
+    except Exception as error:
+        for leftover in [staging, *(staging + suffix for suffix in sidecars)]:
+            _remove_quietly(leftover)
+        if isinstance(error, CacheError):
+            raise
+        raise CacheError("migration_failed") from error
+    finally:
+        for suffix in sidecars:
+            _remove_quietly(path + suffix)
+
+
+def _verify_encrypted(path: str, key: bytes, version: int) -> None:
+    conn = _open_encrypted(path, key)
+    try:
+        found = conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+    if found != version:
+        raise CacheError("migration_failed")
+
+
+def _open_encrypted(path: str, key: bytes):
+    """Open an encrypted database, failing closed on a wrong key or damage."""
+    if _sqlcipher is None:
+        raise CacheError("crypto_unavailable")
+    conn = _sqlcipher.connect(path)
+    conn.execute(f"PRAGMA key = \"x'{key.hex()}'\"")
+    try:
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    except Exception as error:
+        conn.close()
+        raise CacheError("unlock_failed") from error
+    conn.row_factory = _sqlcipher.Row
+    return conn
+
+
 def restrict_cache_permissions(path: str) -> None:
     """Make the cache directory and database files owner-only.
 
@@ -130,14 +230,22 @@ def restrict_cache_permissions(path: str) -> None:
 
 
 class Database:
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(self, path: str | None = None, *, key: bytes | None = None) -> None:
         if path is None:
             data_dir = os.path.join(GLib.get_user_data_dir(), "postcard")
             os.makedirs(data_dir, exist_ok=True)
             path = os.path.join(data_dir, "postcard.db")
 
-        self._conn = sqlite3.connect(path)
-        self._conn.row_factory = sqlite3.Row
+        if path == ":memory:":
+            self._conn = sqlite3.connect(path)
+            self._conn.row_factory = sqlite3.Row
+        else:
+            if not key:
+                raise CacheError("key_missing")
+            if _is_plaintext(path):
+                logger.info("encrypting the plaintext mail cache")
+                _migrate_plaintext_to_encrypted(path, key)
+            self._conn = _open_encrypted(path, key)
         # A sync commits once per message it stores, and the default journal
         # fsyncs on every one of those. Under WAL a commit is an append, and
         # NORMAL leaves the fsync to the checkpoint -- the durability given up

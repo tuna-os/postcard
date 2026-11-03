@@ -1,4 +1,7 @@
 # Dev tooling only — not needed to build/run the Flatpak (see pyproject.toml).
+# sqlcipher3 runs the file-backed database tests against real encryption; the
+# Flatpak builds the same version from source (see in.gxanshu.postcard.json).
 ruff
 pytest
 pyright
+sqlcipher3==0.6.4
