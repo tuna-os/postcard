@@ -58,6 +58,9 @@ One UTF-8 JSON object is sent on stdin, followed by EOF; the helper returns
 one JSON object on stdout. Passwords, TOTP values and sessions never go in
 argv or environment variables. Stderr is discarded by the Python adapter.
 Error replies contain a fixed code, not SDK/server exception text.
+The pinned SDK prints progress to stdout, so the helper parks fd 1 on
+/dev/null while SDK code runs and restores it before printing the reply —
+stdout carries exactly one line, always.
 The helper caps requests at 1 MiB and operations at 90 seconds; the parent
 allows 100 seconds including process startup and kills/reaps on timeout.
 

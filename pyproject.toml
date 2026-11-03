@@ -80,6 +80,11 @@ max-args = 5
 # pytest at the src layout directly — no conftest.py or editable install needed.
 pythonpath = ["src"]
 testpaths = ["tests"]
+# Live tests touch real provider accounts, so a bare run deselects them even
+# when their credentials happen to be exported. Run them explicitly with
+# `pytest -m live tests/live/`; each skips unless its variables are set.
+markers = ["live: touches a real provider account (deselected by default)"]
+addopts = ["-m", "not live"]
 
 [tool.pyright]
 # "basic" catches real mistakes without fighting GTK's incomplete type stubs.
