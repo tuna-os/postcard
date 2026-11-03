@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'native/tuta/**'
       - 'tests/gui/**'
       - 'in.gxanshu.postcard.json'
       - '.github/workflows/gui-tests.yml'
@@ -23,6 +24,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare and verify the pinned SDK
+        run: python3 native/tuta/upstream/scripts/sdk-prepare.py
 
       - name: Install Flatpak tooling and Xvfb
         run: |

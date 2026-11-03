@@ -47,10 +47,41 @@ cargo build --locked --manifest-path native/tuta/Cargo.toml
 POSTCARD_TUTA_TEST_BINARY="$PWD/native/tuta/target/debug/postcard-tuta" python3 -m pytest
 ```
 
-The initial build fetches locked dependencies. Offline Flatpak vendoring and
-shipping the helper inside the sandbox are still tracked in #6. The normal
-Flatpak manifest does not build or install the experimental helper yet.
-No host bridge application is needed.
+The initial build fetches locked dependencies. No host bridge application
+is needed.
+
+## Flatpak packaging
+
+The manifest builds the helper and installs it to `/app/bin`, so the
+Python adapter finds it with `shutil.which("postcard-tuta")` inside the
+sandbox:
+
+- The `postcard-tuta` manifest module compiles
+  `cargo build --offline --locked --release` from a `native/tuta` dir source
+  and installs the binary to `/app/bin`. The build sandbox has no network,
+  so crates arrive as manifest sources: `cargo-sources.json` (generated from
+  `Cargo.lock` with flatpak-builder-tools' `flatpak-cargo-generator.py`)
+  lists every crate tarball by URL and sha256 plus the pinned `uniffi-rs`
+  checkout, and sets `CARGO_HOME` to the module's `cargo/` tree where the
+  generated source-replacement config lands. After any `Cargo.lock` change,
+  regenerate the file and commit it — a stale one fails the offline build
+  loudly. (Committing a 346 MiB `cargo vendor` tree outright was considered
+  and rejected as permanent weight; the 170 KiB generated list carries the
+  same pins.)
+- The module's `skip` list drops the host-only weight: `target/`,
+  `upstream/target/` and the 144 MiB `upstream/tuta-repo`
+  checkout, which no build step reads (only `sdk-prepare.py` needs it, and
+  that runs on the host, not in the sandbox — preparation needs the
+  submodule's git metadata, which the dir source does not carry).
+- The prepared SDK at `upstream/sdk/generated` ships inside the dir source,
+  so a fresh clone must run `git submodule update --init --recursive` and
+  `python3 native/tuta/upstream/scripts/sdk-prepare.py` before building the
+  Flatpak. The native build script re-verifies the prepared content against
+  `sdk/EXPECTED` at compile time, offline.
+- The Rust toolchain comes from the `org.freedesktop.Sdk.Extension.rust-stable`
+  SDK extension (declared in `sdk-extensions`, on PATH via `append-path`);
+  `just init` installs it from the manifest. The GNOME SDK itself ships no
+  `cargo`.
 
 ## IPC v1
 
