@@ -131,6 +131,10 @@ point `SECURITY.md` at it for anything that is not already public.
 
 - `apt-get` packages in CI (`python3-gi`, `flatpak-builder`, …): unpinned
   Debian revisions, bounded by the pinned `ubuntu-24.04` image.
+- apt must never install a package pip also pins: duplicate distributions
+  confuse auditors (`python3-pytest` was removed because pip-licenses read
+  the apt copy's older `MIT License` string instead of the pinned copy's
+  `MIT` and failed the license gate).
 - Flathub runtime/SDK branches (`org.gnome.Platform//51`): branch pins, move
   with Flathub updates; ostree is content-addressed underneath.
 - Python transitive dependencies (e.g. `pluggy` under `pytest`): float under

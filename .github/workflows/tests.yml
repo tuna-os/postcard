@@ -15,11 +15,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Install PyGObject, pycairo and pytest
+      # NOTE: pytest comes from pip below (pinned), never from apt: two
+      # installed copies confuse version-sensitive auditors (pip-licenses
+      # reads the apt copy's older "MIT License" string instead of "MIT").
+      - name: Install PyGObject and pycairo
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-glib-2.0 \
-            gir1.2-gdkpixbuf-2.0 python3-cairo python3-pytest \
+            gir1.2-gdkpixbuf-2.0 python3-cairo \
             python3-dev libssl-dev
 
       # Lint + format + types, enforcing .claude/skills/coding-standards.
