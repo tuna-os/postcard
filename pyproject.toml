@@ -87,6 +87,9 @@ testpaths = ["tests"]
 typeCheckingMode = "basic"
 pythonVersion = "3.12"
 include = ["src/postcard"]
+# sqlcipher3 ships no stubs (C extension behind a star import); this covers the
+# two names database.py uses.
+stubPath = "stubs"
 # The package is never installed into the .venv (it ships as a Flatpak), so
 # tests import it off the source tree — same as pytest's pythonpath setting.
 extraPaths = ["src"]

@@ -51,6 +51,9 @@ from postcard.core.net.ms_oauth import MsOAuthError, Tokens
 from postcard.core.store.database import Database
 from postcard.microsoft_dialog import PostcardMicrosoftDialog
 
+_KEY = bytes(range(32))
+
+
 LOGIN = ms_login.NativeLogin(
     Tokens("access-token", "refresh-token", 3600), '{"refresh_token": "r"}'
 )
@@ -75,7 +78,7 @@ def pump_main_loop_until(predicate, timeout=10.0):
 
 
 def test_sign_in_saves_a_graph_account(monkeypatch, tmp_path):
-    db = Database(str(tmp_path / "postcard.db"))
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
     stored = {}
     monkeypatch.setattr(
         "postcard.microsoft_dialog.ms_login.log_in", lambda **kwargs: LOGIN
@@ -107,7 +110,7 @@ def test_sign_in_saves_a_graph_account(monkeypatch, tmp_path):
 
 
 def test_a_refused_login_returns_to_the_form(monkeypatch, tmp_path):
-    db = Database(str(tmp_path / "postcard.db"))
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
 
     def fail(**kwargs):
         raise MsOAuthError("invalid_grant")
@@ -126,7 +129,7 @@ def test_a_refused_login_returns_to_the_form(monkeypatch, tmp_path):
 
 
 def test_an_invalid_address_never_starts_login(monkeypatch, tmp_path):
-    db = Database(str(tmp_path / "postcard.db"))
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
     monkeypatch.setattr("postcard.core.net.ms_oauth.MS_CLIENT_ID", "test-client")
     dialog = PostcardMicrosoftDialog(db)
     dialog.email_row.set_text("not-an-address")
@@ -140,7 +143,7 @@ def test_an_invalid_address_never_starts_login(monkeypatch, tmp_path):
 
 
 def test_an_existing_address_is_not_added_twice(monkeypatch, tmp_path):
-    db = Database(str(tmp_path / "postcard.db"))
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
     db.save_account("ada@outlook.com", "Ada", "h", 993, "h", 587)
     monkeypatch.setattr("postcard.core.net.ms_oauth.MS_CLIENT_ID", "test-client")
     dialog = PostcardMicrosoftDialog(db)
@@ -154,7 +157,7 @@ def test_an_existing_address_is_not_added_twice(monkeypatch, tmp_path):
 
 
 def test_sign_in_without_a_browser_never_starts_login(monkeypatch, tmp_path):
-    db = Database(str(tmp_path / "postcard.db"))
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
 
     def fail(**kwargs):
         pytest.fail("login started with no browser to complete it")
@@ -177,7 +180,7 @@ def test_sign_in_without_a_browser_never_starts_login(monkeypatch, tmp_path):
 
 
 def test_the_entry_point_hides_until_an_app_is_registered(monkeypatch, tmp_path):
-    db = Database(str(tmp_path / "postcard.db"))
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
 
     monkeypatch.setattr("postcard.core.net.ms_oauth.MS_CLIENT_ID", "")
     assert not PostcardAccountsDialog(db).microsoft_button.get_visible()
@@ -189,7 +192,7 @@ def test_the_entry_point_hides_until_an_app_is_registered(monkeypatch, tmp_path)
 
 def test_dialog_template_ids_match(monkeypatch, tmp_path):
     """Constructing the dialog proves every Template.Child id resolves."""
-    db = Database(str(tmp_path / "postcard.db"))
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
     dialog = PostcardMicrosoftDialog(db)
 
     assert isinstance(dialog.toast_overlay, Gtk.Widget)

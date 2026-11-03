@@ -44,6 +44,20 @@
       ]
     },
     {
+      "name": "sqlcipher3",
+      "buildsystem": "simple",
+      "build-commands": [
+        "python3 -m pip install --prefix=/app --no-deps --no-build-isolation ."
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://files.pythonhosted.org/packages/ce/8a/284f2daec79883151172f3f2f3e35505c90dc48feb081602b4f5c35331d1/sqlcipher3-0.6.4.tar.gz",
+          "sha256": "b02a3edfc554c9197d63ab4c38a30f7682eec65b10e5be2c9285a0d6ffb7a29a"
+        }
+      ]
+    },
+    {
       "name": "postcard",
       "builddir": true,
       "buildsystem": "meson",

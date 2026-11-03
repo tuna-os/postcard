@@ -11,8 +11,9 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gio, GLib
 
 from .composer_window import composer_for_mailto
-from .core import APP_ID
-from .core.store.database import Database
+from .core import APP_ID, secrets
+from .core.net import errors
+from .core.store.database import CacheError, Database
 from .preferences_dialog import PostcardPreferencesDialog
 from .tray import Tray
 from .window import PostcardMainWindow
@@ -33,7 +34,17 @@ class PostcardApplication(Adw.Application):
             resource_base_path="/in/gxanshu/postcard",
         )
         self.version = version
-        self.db = Database()
+        self.db: Database | None
+        self._db_error: CacheError | None = None
+        self._cache_alert_open = False
+        try:
+            self.db = Database(key=secrets.database_key())
+        except CacheError as error:
+            # A locked keyring waits for the user on first activation; the app
+            # never falls back to a plaintext cache.
+            logger.warning("could not open the mail cache: %s", error.code)
+            self.db = None
+            self._db_error = error
         self.settings = Gio.Settings(schema_id=APP_ID)
         self._should_start_hidden = False
 
@@ -85,12 +96,52 @@ class PostcardApplication(Adw.Application):
         return Adw.Application.do_handle_local_options(self, options)
 
     def do_activate(self) -> None:
-        win = self._main_window() or PostcardMainWindow(self, self.db, self.settings)
+        db = self.db
+        if db is None:
+            self._show_cache_error()
+            return
+        win = self._main_window() or PostcardMainWindow(self, db, self.settings)
         if self._should_start_hidden:
             # Only the launch activation stays hidden; later ones raise it.
             self._should_start_hidden = False
             return
         win.present()
+
+    def _show_cache_error(self) -> None:
+        assert self._db_error is not None
+        if not self._cache_alert_open:
+            # A parentless alert holds nothing itself; without this the
+            # application quits the moment after showing it.
+            self.hold()
+            self._cache_alert_open = True
+        _is_auth_failure, message = errors.classify(self._db_error, "")
+        dialog = Adw.AlertDialog(
+            heading=_("Could Not Open the Mail Cache"), body=message
+        )
+        dialog.add_response("retry", _("Retry"))
+        dialog.add_response("quit", _("Quit"))
+        dialog.set_default_response("retry")
+        dialog.set_close_response("quit")
+        dialog.choose(self.props.active_window, None, self._on_cache_alert_done)
+
+    def _on_cache_alert_done(
+        self, dialog: Adw.AlertDialog, result: Gio.AsyncResult
+    ) -> None:
+        if dialog.choose_finish(result) != "retry":
+            self._cache_alert_open = False
+            self.release()
+            self.quit()
+            return
+        try:
+            self.db = Database(key=secrets.database_key())
+        except CacheError as error:
+            logger.warning("could not open the mail cache: %s", error.code)
+            self._db_error = error
+            self._show_cache_error()
+            return
+        self._cache_alert_open = False
+        self.do_activate()
+        self.release()
 
     def do_open(self, files: list[Gio.File], _n_files: int, _hint: str) -> None:
         for file in files:
@@ -103,16 +154,20 @@ class PostcardApplication(Adw.Application):
     # A mailto: link opens the composer and nothing else; the main window is
     # only presented when there is no account to compose from.
     def _open_mailto(self, uri: str) -> None:
+        db = self.db
+        if db is None:
+            self.do_activate()
+            return
         win = self._main_window()
         if win is not None:
             win.open_mailto(uri)
             return
-        accounts = self.db.accounts()
+        accounts = db.accounts()
         if not accounts:
             logger.warning("no account to compose %s from, opening the window", uri)
             self.do_activate()
             return
-        composer_for_mailto(self, self.db, accounts[0], self.settings, uri).present()
+        composer_for_mailto(self, db, accounts[0], self.settings, uri).present()
 
     # Register an app.<name> action, optionally with keyboard accelerators.
     def _create_action(
@@ -153,4 +208,5 @@ class PostcardApplication(Adw.Application):
             win.open_email(folder_id, uid)
 
     def on_new_window_action(self, *_args: object) -> None:
-        PostcardMainWindow(self, self.db, self.settings).present()
+        if self.db is not None:
+            PostcardMainWindow(self, self.db, self.settings).present()

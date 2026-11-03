@@ -2,12 +2,13 @@
 typed in by hand, GNOME Online Accounts for one imported from Settings."""
 
 import logging
+import secrets as stdlib_secrets
 
 import gi
 
 gi.require_version("Secret", "1")
 
-from gi.repository import Secret
+from gi.repository import GLib, Secret
 
 from . import goa
 from .models.account import Account
@@ -15,6 +16,7 @@ from .net import ms_oauth
 from .net.auth import Credential
 from .net.proton_session import MECHANISM_PROTON
 from .net.tuta_session import MECHANISM_TUTA
+from .store.database import CacheError
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,14 @@ _SCHEMA = Secret.Schema.new(
     Secret.SchemaFlags.NONE,
     {"account-id": Secret.SchemaAttributeType.INTEGER},
 )
+
+_DB_KEY_SCHEMA = Secret.Schema.new(
+    "in.gxanshu.postcard.CacheKey",
+    Secret.SchemaFlags.NONE,
+    {"purpose": Secret.SchemaAttributeType.STRING},
+)
+_DB_KEY_BYTES = 32
+_DB_KEY_ATTRIBUTES = {"purpose": "mail-cache"}
 
 
 def store_password(account_id: int, password: str) -> None:
@@ -42,6 +52,41 @@ def lookup_password(account_id: int) -> str | None:
 
 def clear_password(account_id: int) -> bool:
     return Secret.password_clear_sync(_SCHEMA, {"account-id": str(account_id)}, None)
+
+
+def database_key() -> bytes:
+    """The SQLCipher key for the mail cache, generating it once if needed.
+
+    Called on the main thread at startup; a locked keyring prompts here rather
+    than failing the launch outright. Raises CacheError when the keyring gives
+    nothing usable -- the caller waits for the user, never falls back.
+    """
+    try:
+        stored = Secret.password_lookup_sync(_DB_KEY_SCHEMA, _DB_KEY_ATTRIBUTES, None)
+    except GLib.Error as error:
+        raise CacheError("key_unavailable") from error
+    if stored:
+        try:
+            key = bytes.fromhex(stored)
+        except ValueError:
+            key = b""
+        if len(key) == _DB_KEY_BYTES:
+            return key
+        logger.warning("the stored cache key is malformed; keeping it untouched")
+        raise CacheError("key_unavailable")
+    key = stdlib_secrets.token_bytes(_DB_KEY_BYTES)
+    try:
+        Secret.password_store_sync(
+            _DB_KEY_SCHEMA,
+            _DB_KEY_ATTRIBUTES,
+            Secret.COLLECTION_DEFAULT,
+            "Postcard mail cache key",
+            key.hex(),
+            None,
+        )
+    except GLib.Error as error:
+        raise CacheError("key_unavailable") from error
+    return key
 
 
 def credential_for(account: Account) -> Credential | None:

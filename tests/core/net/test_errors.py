@@ -9,6 +9,7 @@ from postcard.core.net.ms_oauth import MsOAuthError
 from postcard.core.net.proton_session import ProtonError
 from postcard.core.net.smtp_session import SmtpError
 from postcard.core.net.tuta_session import TutaError
+from postcard.core.store.database import CacheError
 
 # Only the "is this the password?" half is asserted — the messages go through
 # gettext, so their text depends on the active translation. Everything that is
@@ -99,3 +100,21 @@ def test_a_missing_second_factor_is_a_sign_in_problem():
 
 def test_an_unimplemented_proton_operation_is_not():
     assert not is_auth_failure(ProtonError("unsupported_operation"))
+
+
+# --- Encrypted cache --------------------------------------------------------
+
+
+def test_cache_failures_are_not_auth_failures_and_leak_nothing():
+    for code in (
+        "key_missing",
+        "key_unavailable",
+        "crypto_unavailable",
+        "unlock_failed",
+        "migration_failed",
+    ):
+        is_auth, message = classify(CacheError(code), "host.example")
+        assert not is_auth
+        assert code not in message
+        assert "host.example" not in message
+        assert message

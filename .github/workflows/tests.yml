@@ -17,7 +17,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-glib-2.0 \
-            gir1.2-gdkpixbuf-2.0 python3-cairo python3-pytest
+            gir1.2-gdkpixbuf-2.0 python3-cairo python3-pytest \
+            python3-dev libssl-dev
 
       # Lint + format + types, enforcing .claude/skills/coding-standards.
       # Installed with pip rather than `just check` so CI needs no `just`.
@@ -30,6 +31,7 @@ jobs:
         run: |
           pip install ruff pyright
           pip install --no-deps PyGObject-stubs==2.18.0
+          pip install sqlcipher3==0.6.4
 
       - name: Lint and format check
         run: |

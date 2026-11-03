@@ -15,7 +15,7 @@ a bridge daemon, or assume a JMAP endpoint exists.
 | Account setup, resumable sessions and 2FA | [#2](https://github.com/tuna-os/postcard/issues/2) | Planned |
 | Complete mailbox sync, history, bodies and attachments | [#3](https://github.com/tuna-os/postcard/issues/3) | Prototype; replies validated, live validation pending |
 | Mutations, drafts and encryption-preserving sending | [#4](https://github.com/tuna-os/postcard/issues/4) | Read/move prototype; sending blocked (see below) |
-| Local-cache privacy and credential lifecycle | [#5](https://github.com/tuna-os/postcard/issues/5) | Release prerequisite |
+| Local-cache privacy and credential lifecycle | [#5](https://github.com/tuna-os/postcard/issues/5) | Done: SQLCipher cache, keyring key, migration |
 | Flatpak, SDK compatibility and end-to-end validation | [#6](https://github.com/tuna-os/postcard/issues/6) | Release prerequisite |
 
 The initial adapter is developer-only. The normal Add Account dialog does not
@@ -90,21 +90,21 @@ What remains, in order:
 2. Add re-authentication UX for refused refresh tokens, and reword the Graph
    401 message, which currently assumes the token came from Online Accounts.
 
-## Local-cache privacy — the encrypted-at-rest plan
+## Local-cache privacy — encrypted at rest
 
-All providers share one SQLite cache, currently plaintext: message bodies,
-FTS text, contacts and threading headers. Already in place: the process runs
-under umask 077 and every database open re-tightens the cache directory and
-database files (including WAL sidecars, which do not inherit the database
-file's mode) to owner-only. The full plan, tracked in #5:
+All providers share one SQLite cache: message bodies, FTS text, contacts and
+threading headers. It is encrypted with SQLCipher (4.19.0, via the
+self-contained `sqlcipher3` binding built from source in the Flatpak), keyed
+by a random 256-bit key generated once and held in the keyring beside the
+account passwords. Only `:memory:` databases stay plaintext.
 
-- Encrypt the database file with SQLCipher, keyed by a random key generated
-  once and held in the keyring beside the account passwords.
-- Migrate in place: on first unlock after the upgrade, attach the plaintext
-  database and export it into the encrypted one, then remove the original.
-- Keep the key out of logs, errors and crash reports the same way session
-  material already is; a locked keyring means the app waits, not that it falls
-  back to plaintext.
-
-Until that lands, no provider that decrypts server-side encryption on-device
-(Tuta first, Proton next) is offered in the Add Account dialog.
+- Migrate in place: on first open after the upgrade, a plaintext cache is
+  exported into a staging file, verified (schema version must match), and
+  atomically moved over the original; any failure leaves the original
+  untouched, and stale plaintext sidecars are removed either way.
+- Fail closed everywhere: no key, no binding, a wrong key, or a failed
+  migration all raise `CacheError` with fixed user-facing text. The app shows
+  a Retry/Quit alert and waits — it never falls back to plaintext, and the
+  key never appears in logs, errors, or crash reports.
+- Defense in depth underneath: the process runs under umask 077 and every
+  database open re-tightens the cache directory and files to owner-only.
