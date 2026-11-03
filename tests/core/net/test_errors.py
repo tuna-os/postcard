@@ -4,7 +4,7 @@ import ssl
 from postcard.core.net import errors
 from postcard.core.net.errors import classify
 from postcard.core.net.graph_session import GraphError
-from postcard.core.net.imap_session import ImapError
+from postcard.core.net.imap_session import ImapError, UidValidityError
 from postcard.core.net.ms_oauth import MsOAuthError
 from postcard.core.net.proton_session import ProtonError
 from postcard.core.net.smtp_session import SmtpError
@@ -96,6 +96,25 @@ def test_a_missing_second_factor_is_a_sign_in_problem():
     assert is_auth_failure(TutaError("second_factor_required"))
     assert not is_auth_failure(TutaError("helper_missing"))
     assert not is_auth_failure(TutaError("unsupported_operation"))
+
+
+def test_a_changed_folder_is_not_a_password_problem():
+    assert not is_auth_failure(UidValidityError("UIDVALIDITY changed"))
+
+
+def test_tuta_sign_in_and_second_factor_failures_stay_distinct():
+    for code in ("login_failed", "resume_failed"):
+        is_auth, message = classify(TutaError(code), "h")
+        assert not is_auth
+        assert code not in message
+        assert message
+    is_auth, message = classify(TutaError("unsupported_second_factor"), "h")
+    assert is_auth
+    assert message
+    is_auth, fallback = classify(TutaError("helper_failed"), "h")
+    assert not is_auth
+    assert fallback
+    assert fallback != message
 
 
 def test_an_unimplemented_proton_operation_is_not():
