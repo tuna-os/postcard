@@ -1,0 +1,145 @@
+name: Implementation task
+description: A machine-actionable work item for a contributor or Hive agent
+labels: [stage/015-triage-needed]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form defines a task an agent can pick up and a reviewer can verify.
+        Be concrete: a task without acceptance commands is a discussion, not
+        work. State what a human must decide up front so nobody guesses.
+
+        **Please never paste passwords, app passwords, OAuth tokens, refresh
+        tokens, or the contents of real messages**. This tracker is public.
+        Automation must never need live credentials (see
+        `docs/hive/headless.md`).
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched [existing issues](https://github.com/gxanshu/postcard/issues?q=is%3Aissue) and this isn't already covered.
+          required: true
+        - label: I read the task-state and evidence rules in `docs/hive/contracts.md`, or this task needs no Hive handling.
+          required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The one outcome this task must produce, in a sentence or two.
+      placeholder: Decrypt Tuta message bodies through the compiled helper and surface failures as attachment_failed instead of a KeyError.
+    validations:
+      required: true
+
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: What this task explicitly must NOT touch, so scope stays checkable.
+      placeholder: |
+        - No sending or drafts (tracked in #4).
+        - No Add Account dialog changes.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: surfaces
+    attributes:
+      label: Affected surfaces
+      description: Tick every layer the work is expected to touch.
+      options:
+        - label: "`core/` — threader, compose, MIME parser, models, database"
+        - label: "`net/` — IMAP/SMTP sessions"
+        - label: "`net/` — Microsoft Graph modules"
+        - label: "Native helpers (`native/tuta/`, `native/proton/`) or their Python adapters"
+        - label: "GTK layer (`window.py`, composer, dialogs, `mail_sync.py`, tray)"
+        - label: "Flatpak manifest, meson build, or translations"
+        - label: "Website (`web/`) or release/publish path"
+        - label: "CI workflows (`.github/workflows/`)"
+        - label: "Docs only"
+        - label: Not sure yet
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance scenarios and commands
+      description: |
+        How the reviewer (or a bot) proves this done. Name real commands from
+        the justfile/CI — `just check`, `just test`, `just test-gui`,
+        `just build` — plus any scenario that needs a human eye (`just run`).
+        Compilation alone is never acceptance.
+      placeholder: |
+        1. `just check` passes.
+        2. `just test` passes, including the new `tests/core/net/test_tuta_body.py`.
+        3. Corrupt fixture body returns `attachment_failed`; covered by a test, not a log screenshot.
+        4. `just run` with the offline fixture: no toast, no traceback in `POSTCARD_LOG=debug` output.
+      value: |
+        1. `just check` passes.
+        2. `just test` passes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy impact
+      description: |
+        Mail contents, credentials, keyring entries, cache encryption, network
+        calls. Say "none" only when the work touches none of these.
+      placeholder: |
+        Reads fixture bodies only; no network, no keyring, no cache-format change.
+        Live validation (if any) follows tests/live/README.md on a dedicated account.
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: |
+        Issues or PRs that must land first ("Blocked by #N"), and anything this
+        unblocks. Backlog dependencies are acceptance gates, not permission to
+        skip work.
+      placeholder: |
+        Blocked by #21 (policy this implements).
+        Blocks #6 (needs this validated first).
+
+  - type: textarea
+    id: human-blockers
+    attributes:
+      label: Human-decision blockers
+      description: |
+        Decisions only a person can make — product judgement, trust calls,
+        account access, release timing. Write "none" when the task is fully
+        specified and an agent may proceed to a PR on its own.
+      placeholder: |
+        - Maintainer must confirm the German wording of the new error string.
+        - Needs a maintainer-run live check: no dedicated Tuta test account is available to automation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Expected PR evidence
+      description: Runtime artifacts the PR must attach beyond the diff (command output, logs, screenshots). Logs must be redacted.
+      placeholder: |
+        - `just test` output showing the new tests passing.
+        - Redacted `POSTCARD_LOG=debug` excerpt of the failure path.
+        - Rollback: revert the single commit; no migration, no cache-format change.
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Links, prior art, screenshots, or context that does not fit above.
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Final check
+      options:
+        - label: I've checked that this task contains no passwords, tokens, or private message contents.
+          required: true
