@@ -1,15 +1,12 @@
-# Proton native helper (stub)
+# Proton native helper
 
-`main.go` is a stdlib-only Go program that speaks the same stdio JSON
-envelope as the [Tuta helper](../tuta/README.md): one request line on stdin,
-one reply line on stdout, protocol version pinned at `1`. Every known
-operation currently answers `unsupported_operation`, which
+`main.go` speaks the same stdio JSON envelope as the
+[Tuta helper](../tuta/README.md): one request line on stdin, one reply line
+on stdout, protocol version pinned at `1`. `login` is implemented over
+`go-proton-api` (SRP, plus a TOTP challenge when the account sets one);
+every other known operation still answers `unsupported_operation`, which
 `proton_session.py` surfaces as a fixed, UI-safe code — a real account can
 never silently get nothing back.
-
-The stub exists so the framing, timeouts, versioning and Python transport can
-be built and tested without pulling in the real Proton libraries. Anything
-cryptographic or account-touching comes later, behind live-account testing.
 
 ## Protocol
 
@@ -21,7 +18,21 @@ Reply: `{"version": 1, "ok": true, ...}` or
 |-----------------------|------------------------------------------------------|
 | `unsupported_version` | `version` is present but not `1` — caller must stop |
 | `invalid_request`     | malformed JSON, missing field, oversize, unknown op |
-| `unsupported_operation` | known op (`login`, `sync`, `message`, `mark_read`, `move`) not yet implemented |
+| `login_failed`        | wrong password or unknown username                   |
+| `second_factor_required` | TOTP challenge, no code given                     |
+| `invalid_totp`        | TOTP code malformed                                  |
+| `unsupported_second_factor` | only non-TOTP factors available               |
+| `second_factor_failed` | TOTP rejected by the server                         |
+| `request_failed`      | network fault or unexpected API error                |
+| `timeout`             | the 90-second operation budget ran out               |
+| `unsupported_operation` | known op (`sync`, `message`, `mark_read`, `move`) not yet implemented |
+
+`login` takes `email`, `password` and an optional `totp`, and returns
+`result.session`: `login` (echoed for the identity check), `user_id`, `uid`,
+`access_token`, `refresh_token` and `password_mode` (1 or 2, telling sync
+whether the mailbox keys need a separate passphrase). Mailbox keys stay
+locked until sync first decrypts. The helper identifies to the API as
+`Other`, the third-party slot — never as an official client.
 
 A missing `version` is `invalid_request`, not `unsupported_version`: the helper
 only negotiates with callers that speak the envelope. Blank lines are skipped.
@@ -65,11 +76,13 @@ versions once the helper takes dependencies):
 
 ## Roadmap
 
-1. This stub: framing + fixed codes + CI.
-2. `login` via SRP against a live account, mailbox password from stdin only
-   (the Tuta `get_password` / `drop: true` pattern), session tokens cached
-   like the Tuta helper's session blob.
+1. Done: framing + fixed codes + CI.
+2. Done: `login` via SRP, session tokens cached in the session blob the way
+   the Tuta helper's works. Live validation waits on the test account's
+   abuse limitation clearing (see `tests/live/README.md`).
 3. `sync` over `GetMessageMetadataPage`, with the event stream driving
-   arrive notifications the way IMAP IDLE does.
+   arrive notifications the way IMAP IDLE does. Mailbox keys unlock here,
+   on first decrypt — one-password accounts reuse the login password,
+   two-password accounts need their mailbox passphrase per operation.
 4. `message`, `mark_read`, `move`, `send` (draft + send), session revocation
    via `AuthRevoke` — no local-only gap like Tuta's pinned SDK leaves.

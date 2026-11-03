@@ -33,6 +33,16 @@ pytest -m live tests/live/test_tuta_live.py   # one provider
 | `POSTCARD_MS_CLIENT_ID` | Microsoft | Entra application (client) id |
 | `POSTCARD_MS_REFRESH_TOKEN` | Microsoft | stored refresh token (see below) |
 | `POSTCARD_MS_EMAIL` | Microsoft | account address; defaults to `live@example.com` |
+| `POSTCARD_PROTON_TEST_BINARY` | Proton | helper binary; else `postcard-proton` on `PATH` |
+| `POSTCARD_PROTON_EMAIL` | Proton | test account username or address |
+| `POSTCARD_PROTON_PASSWORD` | Proton | test account password |
+| `POSTCARD_PROTON_TOTP` | Proton | current second-factor code, when the account uses one |
+
+Dormant accounts may trip provider abuse detection on first contact from a
+new network — Proton answers 422 "unusual activity" and Tuta may refuse
+clients it has never seen. When that happens, sign in once from a browser on
+a familiar network to clear the flag, then re-run; do not hammer the live
+tests against a limitation, retries escalate it.
 
 ## Bootstrapping the Microsoft token
 
@@ -49,6 +59,5 @@ compliant OAuth client with those scopes produces an equivalent token.
 
 - Tuta: login plus a one-page sync through the compiled helper.
 - Microsoft: refresh plus a one-page folder read through Graph.
-- Proton: no live test yet — the helper is still the `unsupported_operation`
-  stub, and there is nothing account-side to validate. It lands with the real
-  helper, following this directory's rules.
+- Proton: SRP login through the compiled helper, asserting the resumable
+  session carries tokens but never the password.

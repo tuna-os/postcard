@@ -119,6 +119,23 @@ def test_tuta_sign_in_and_second_factor_failures_stay_distinct():
 
 def test_an_unimplemented_proton_operation_is_not():
     assert not is_auth_failure(ProtonError("unsupported_operation"))
+    assert not is_auth_failure(ProtonError("helper_missing"))
+
+
+def test_proton_sign_in_and_second_factor_failures_stay_distinct():
+    assert is_auth_failure(ProtonError("login_failed"))
+    for code in ("second_factor_required", "invalid_totp", "second_factor_failed"):
+        is_auth, message = classify(ProtonError(code), "h")
+        assert is_auth
+        assert code not in message
+        assert message
+    is_auth, message = classify(ProtonError("unsupported_second_factor"), "h")
+    assert is_auth
+    assert message
+    is_auth, fallback = classify(ProtonError("helper_failed"), "h")
+    assert not is_auth
+    assert fallback
+    assert fallback != message
 
 
 # --- Encrypted cache --------------------------------------------------------

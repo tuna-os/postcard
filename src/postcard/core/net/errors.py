@@ -50,7 +50,7 @@ def classify(  # noqa: PLR0911, PLR0912, C901
     if isinstance(exc, TutaError):
         return _classify_tuta(exc)
     if isinstance(exc, ProtonError):
-        return False, _("Proton Mail is not supported in this build yet.")
+        return _classify_proton(exc)
     if isinstance(exc, MsOAuthError):
         return _classify_ms_oauth(exc)
     if isinstance(exc, CacheError):
@@ -122,6 +122,22 @@ def _classify_ms_oauth(exc: MsOAuthError) -> tuple[bool, str]:
             "The Microsoft sign-in expired. Reconnect the account to continue."
         )
     return False, _("The Microsoft sign-in could not be completed. Try again later.")
+
+
+def _classify_proton(exc: ProtonError) -> tuple[bool, str]:
+    if exc.code == "helper_missing":
+        return False, _("This build does not include the experimental Proton helper.")
+    if exc.code == "login_failed":
+        return True, _("Proton sign-in failed. Check the account password.")
+    if exc.code in ("second_factor_required", "invalid_totp", "second_factor_failed"):
+        return True, _("Proton requires a valid second-factor code.")
+    if exc.code == "unsupported_second_factor":
+        return True, _("This Proton second-factor method is not supported yet.")
+    if exc.code == "unsupported_operation":
+        return False, _(
+            "This operation is not supported by the experimental Proton backend yet."
+        )
+    return False, _("The experimental Proton operation failed. Try again later.")
 
 
 def _classify_tuta(exc: TutaError) -> tuple[bool, str]:

@@ -61,6 +61,9 @@ func dispatch(raw []byte) envelope {
 	if !operations[decoded.Op] {
 		return failure("invalid_request")
 	}
+	if decoded.Op == "login" {
+		return login(raw)
+	}
 	return failure("unsupported_operation")
 }
 

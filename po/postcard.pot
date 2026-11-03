@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-03 13:58+0000\n"
+"POT-Creation-Date: 2026-11-03 20:14+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -299,10 +299,6 @@ msgstr ""
 msgid "Connecting to {host} timed out."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:53
-msgid "Proton Mail is not supported in this build yet."
-msgstr ""
-
 #: src/postcard/core/net/errors.py:61
 msgid "This folder changed on the server. Refresh and try again."
 msgstr ""
@@ -356,27 +352,51 @@ msgid "The Microsoft sign-in could not be completed. Try again later."
 msgstr ""
 
 #: src/postcard/core/net/errors.py:129
+msgid "This build does not include the experimental Proton helper."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:131
+msgid "Proton sign-in failed. Check the account password."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:133
+msgid "Proton requires a valid second-factor code."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:135
+msgid "This Proton second-factor method is not supported yet."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:138
+msgid "This operation is not supported by the experimental Proton backend yet."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:140
+msgid "The experimental Proton operation failed. Try again later."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:145
 msgid "This build does not include the experimental Tuta helper."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:132
+#: src/postcard/core/net/errors.py:148
 msgid ""
 "Tuta sign-in could not be completed. Check the session and client version."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:135
+#: src/postcard/core/net/errors.py:151
 msgid "Tuta requires a valid second-factor code."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:137
+#: src/postcard/core/net/errors.py:153
 msgid "This Tuta second-factor method is not supported yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:140
+#: src/postcard/core/net/errors.py:156
 msgid "This operation is not supported by the experimental Tuta backend yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:142
+#: src/postcard/core/net/errors.py:158
 msgid "The experimental Tuta operation failed. Try again later."
 msgstr ""
 

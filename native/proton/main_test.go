@@ -26,8 +26,8 @@ func codeOf(t *testing.T, raw string) string {
 	return decoded.Error.Code
 }
 
-func TestKnownOperationsAreReserved(t *testing.T) {
-	for _, op := range []string{"login", "sync", "message", "mark_read", "move"} {
+func TestUnimplementedOperationsAreReserved(t *testing.T) {
+	for _, op := range []string{"sync", "message", "mark_read", "move"} {
 		if got := codeOf(t, `{"version":1,"op":"`+op+`"}`); got != "unsupported_operation" {
 			t.Errorf("op %s code = %q, want unsupported_operation", op, got)
 		}
