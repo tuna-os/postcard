@@ -10,9 +10,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned generation, not ubuntu-latest: the 24.04 image ships python3.12,
+    # matching the ruff target and pyright language level (asserted below).
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install PyGObject, pycairo and pytest
         run: |
           sudo apt-get update
@@ -22,16 +24,18 @@ jobs:
 
       # Lint + format + types, enforcing .claude/skills/coding-standards.
       # Installed with pip rather than `just check` so CI needs no `just`.
-      # PyGObject-stubs needs --no-deps: it depends on PyGObject, which builds
-      # pycairo from source and needs cairo headers. gi comes from python3-gi
-      # (installed above) and the stubs are pure .pyi files regardless. Pinned
-      # because a stubs release can tighten a signature and fail pyright on
-      # code nobody touched; bump it here and in the justfile together.
+      # requirements.txt is the one version source, used as constraints (see
+      # `just init`, which installs the same set). PyGObject-stubs needs
+      # --no-deps: it depends on PyGObject, which builds pycairo from source
+      # and needs cairo headers. gi comes from python3-gi (installed above)
+      # and the stubs are pure .pyi files regardless.
       - name: Install lint and type-check tooling
         run: |
-          pip install ruff pyright
-          pip install --no-deps PyGObject-stubs==2.18.0
-          pip install sqlcipher3==0.6.4
+          pip install --no-deps -c requirements.txt PyGObject-stubs
+          pip install -c requirements.txt ruff pytest pyright pip-audit pip-licenses sqlcipher3
+
+      - name: Confirm the 3.12 target interpreter
+        run: python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
 
       - name: Lint and format check
         run: |
@@ -45,3 +49,28 @@ jobs:
       # so there is nothing to install or build first.
       - name: Run the tests
         run: python3 -m pytest
+
+      # Fail on any known vulnerability in the pinned tool set. Only the direct
+      # pins are audited (transitives float); triage and the ignore escape
+      # hatch live in docs/supply-chain.md.
+      - name: Audit pinned tools for known vulnerabilities
+        run: pip-audit --disable-pip --no-deps -r requirements.txt
+
+      # Fail on any tool license outside the allow list. sqlcipher3 reports
+      # UNKNOWN (no License metadata), so it is checked out of band: its
+      # zlib-style license was verified in the pinned sdist, see
+      # docs/supply-chain.md. pip-licenses omits its own distribution (MIT).
+      - name: Check tool licenses
+        run: |
+          pip-licenses --packages ruff pytest pyright pip-audit PyGObject-stubs \
+            --allow-only="MIT;Apache Software License;GNU Lesser General Public License v2 or later (LGPLv2+)"
+
+      # actionlint ships as a release binary; the pinned version plus a
+      # checksum is the whole install. Bump both together (see
+      # docs/supply-chain.md); the same version validates workflows locally.
+      - name: Lint workflow files
+        run: |
+          curl -sSL -o /tmp/actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint .github/workflows/*.yml

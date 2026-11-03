@@ -1,0 +1,40 @@
+# Automated update PRs for every pinned input dependabot understands
+# (issue #18). Pins it cannot see — container digests, rust-toolchain.toml,
+# `go-version`, `cargo install --version`, actionlint/syft binaries, runner
+# labels — are listed with their bump commands in docs/supply-chain.md.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: "cargo"
+    directory: "/native/tuta"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: "gomod"
+    directory: "/native/proton"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"

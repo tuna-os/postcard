@@ -8,6 +8,7 @@ on:
       - 'tests/core/net/test_tuta*.py'
       - '.gitmodules'
       - '.github/workflows/tuta-native.yml'
+      - 'rust-toolchain.toml'
   workflow_dispatch:
 
 permissions:
@@ -15,22 +16,38 @@ permissions:
 
 jobs:
   native:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
       - name: Prepare and verify the pinned SDK
         run: python3 native/tuta/upstream/scripts/sdk-prepare.py
+      # The toolchain is declared once in rust-toolchain.toml; CI installs that
+      # exact version and the rustup shim applies it to every cargo below, so
+      # the declared compiler builds and tests the locked (--locked) graph.
       - name: Install the tested Rust toolchain
-        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt
+        run: |
+          toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt
+          cargo --version
+          rustc --version
       - name: Check Rust formatting
-        run: cargo +1.99.1 fmt --manifest-path native/tuta/Cargo.toml --check
+        run: cargo fmt --manifest-path native/tuta/Cargo.toml --check
       - name: Build and test the native adapter
         run: |
-          cargo +1.99.1 test --locked --manifest-path native/tuta/Cargo.toml
-          cargo +1.99.1 build --locked --manifest-path native/tuta/Cargo.toml
+          cargo test --locked --manifest-path native/tuta/Cargo.toml
+          cargo build --locked --manifest-path native/tuta/Cargo.toml
+      # Pinned auditor installed reproducibly from crates.io (--locked uses the
+      # auditor's own lockfile). Bump deliberately; see docs/supply-chain.md.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.20.2
+      # Vulnerabilities, duplicate versions, licenses, sources. The license
+      # allow-list and the triage escape hatches live in native/tuta/deny.toml.
+      - name: Audit dependencies for vulnerabilities and licenses
+        working-directory: native/tuta
+        run: cargo deny check
       - name: Test the Python and compiled-helper contract without an account
         run: |
-          python3 -m pip install pytest
+          python3 -m pip install -c requirements.txt pytest
           POSTCARD_TUTA_TEST_BINARY="$PWD/native/tuta/target/debug/postcard-tuta" python3 -m pytest tests/core/net/test_tuta_session.py

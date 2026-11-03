@@ -20,10 +20,10 @@ permissions:
 
 jobs:
   gui:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
 
@@ -38,7 +38,7 @@ jobs:
       # The runtime + SDK download dwarfs the build; the user installation
       # lives entirely under ~/.local/share/flatpak and is cache-safe.
       - name: Restore the Flatpak runtime cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.local/share/flatpak
           key: flatpak-${{ hashFiles('in.gxanshu.postcard.json') }}
@@ -57,9 +57,10 @@ jobs:
             .flatpak/build in.gxanshu.postcard.json
 
       # Installed with pip rather than `just test-gui` so CI needs no `just`.
+      # Pinned via the requirements.txt constraints, like `just test-gui`.
       - name: Run the GUI suite inside the sandbox under Xvfb
         run: |
-          python3 -m pip install --target="$PWD/.flatpak/pytest-libs" pytest
+          python3 -m pip install --target="$PWD/.flatpak/pytest-libs" -c requirements.txt pytest
           xvfb-run -a flatpak run --filesystem="$PWD" \
             --env=PYTHONPATH="$PWD/src:$PWD/.flatpak/pytest-libs" \
             --command=python3 in.gxanshu.postcard \
