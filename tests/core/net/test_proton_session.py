@@ -123,6 +123,49 @@ def test_missing_helper_is_explicit():
     assert caught.value.code == "helper_missing"
 
 
+def test_a_helper_that_exits_uncleanly_fails_as_one():
+    completed = subprocess.CompletedProcess(["postcard-proton"], 1, "")
+    with (
+        patch("shutil.which", return_value="/app/bin/postcard-proton"),
+        patch("subprocess.run", return_value=completed),
+        pytest.raises(ProtonError) as caught,
+    ):
+        helper_transport({})
+    assert caught.value.code == "helper_failed"
+
+
+@pytest.mark.parametrize("stdout", ["not json", "[]"])
+def test_a_shapeless_helper_reply_is_not_a_session(stdout):
+    completed = subprocess.CompletedProcess(["postcard-proton"], 0, stdout)
+    with (
+        patch("shutil.which", return_value="/app/bin/postcard-proton"),
+        patch("subprocess.run", return_value=completed),
+        pytest.raises(ProtonError) as caught,
+    ):
+        helper_transport({})
+    assert caught.value.code == "invalid_response"
+
+
+@pytest.mark.parametrize(
+    "session",
+    [{"login": "other@proton.me"}, "not-a-session"],
+)
+def test_login_rejects_a_session_for_someone_else(session):
+    def transport(request):
+        return {"version": 1, "result": {"session": session}}
+
+    with pytest.raises(ProtonError) as caught:
+        login(SESSION["login"], "fixture-password", transport=transport)
+    assert caught.value.code == "invalid_response"
+
+
+def test_a_session_cannot_resume_a_shapeless_secret():
+    credential = Credential(SESSION["login"], "not-json", MECHANISM_PROTON)
+    with pytest.raises(ProtonError) as caught:
+        ProtonSession(credential)
+    assert caught.value.code == "invalid_request"
+
+
 def test_compiled_helper_speaks_the_pinned_contract_without_network():
     import os
 

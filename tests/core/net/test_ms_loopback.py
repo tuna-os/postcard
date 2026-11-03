@@ -2,6 +2,8 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.server import HTTPServer
+from unittest.mock import patch
 
 import pytest
 
@@ -134,3 +136,25 @@ def test_an_empty_state_or_timeout_is_rejected_before_serving():
             redirect.wait_for_code("state-1", timeout=0)
         assert caught.value.code == "invalid_request"
         assert redirect._server.requests == []
+
+
+def test_a_listener_that_cannot_bind_fails_as_a_bad_request():
+    with (
+        patch.object(HTTPServer, "server_bind", side_effect=OSError("denied")),
+        pytest.raises(MsOAuthError) as caught,
+    ):
+        LoopbackRedirect()
+    assert caught.value.code == "invalid_request"
+
+
+def test_broken_accepts_count_as_knocks_then_give_up():
+    with (
+        LoopbackRedirect() as redirect,
+        patch.object(
+            HTTPServer, "handle_request", side_effect=OSError("accept failed")
+        ),
+        pytest.raises(MsOAuthError) as caught,
+    ):
+        redirect.wait_for_code("state-1", timeout=10.0)
+    assert caught.value.code == "invalid_request"
+    assert len(redirect._server.requests) == 20

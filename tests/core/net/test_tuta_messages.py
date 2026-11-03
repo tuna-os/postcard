@@ -215,3 +215,40 @@ def test_a_mistyped_attachment_label_falls_back_to_a_default():
     )
     assert attachment.get_filename() == "attachment"
     assert attachment.get_content_type() == "application/octet-stream"
+
+
+def test_a_misshapen_address_is_dropped_not_fatal():
+    raw = tuta_messages.mime_message(
+        {"header": HEADER, "html": "body", "to": ["not-an-address"]}
+    )
+    assert BytesParser(policy=policy.default).parsebytes(raw)["To"] == ""
+
+
+def test_a_typeless_attachment_falls_back_to_octet_stream():
+    raw = tuta_messages.mime_message(
+        {
+            "header": HEADER,
+            "html": "body",
+            "attachments": [{"name": "x", "mime_type": "noslash", "data": "aGk="}],
+        }
+    )
+    attachment = next(
+        BytesParser(policy=policy.default).parsebytes(raw).iter_attachments()
+    )
+    assert attachment.get_content_type() == "application/octet-stream"
+
+
+def test_fetch_mime_delegates_to_the_message_operation():
+    class Session:
+        def __init__(self):
+            self.requests = []
+
+        def request(self, operation, **kwargs):
+            self.requests.append((operation, kwargs))
+            return {"header": HEADER, "html": "body"}
+
+    session = Session()
+    raw = tuta_messages.fetch_mime(session, "list/message")
+    assert session.requests == [("message", {"id": "list/message"})]
+    parsed = BytesParser(policy=policy.default).parsebytes(raw)
+    assert parsed["Subject"] == "नमस्ते"

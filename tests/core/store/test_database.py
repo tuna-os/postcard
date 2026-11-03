@@ -1,7 +1,10 @@
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -759,6 +762,16 @@ def test_missing_sidecars_are_normal_not_an_error(tmp_path, caplog):
     assert "could not restrict" not in caplog.text
 
 
+def test_restriction_failures_warn_without_failing(tmp_path, caplog, monkeypatch):
+    def _deny(path, mode):
+        raise OSError("denied")
+
+    monkeypatch.setattr(os, "chmod", _deny)
+    restrict_cache_permissions(str(tmp_path / "postcard.db"))
+
+    assert caplog.text.count("could not restrict") == 5
+
+
 # --- encryption at rest -----------------------------------------------------
 
 
@@ -841,3 +854,79 @@ def test_migration_leaves_a_broken_cache_untouched(tmp_path):
     assert caught.value.code == "migration_failed"
     assert path.read_bytes() == b"SQLite format 3\x00" + bytes(100)
     assert not (tmp_path / "postcard.db.migrating").exists()
+
+
+def test_a_missing_binding_is_detected_at_import():
+    # The fallback only runs at import time, so a fresh interpreter with the
+    # binding blocked exercises it without disturbing this process.
+    root = Path(__file__).resolve().parents[3]
+    probe = (
+        "import sys; sys.modules['sqlcipher3'] = None;"
+        " import postcard.core.store.database as d;"
+        " assert d._sqlcipher is None"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_migration_without_the_binding_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setattr(database_module, "_sqlcipher", None)
+    with pytest.raises(CacheError) as caught:
+        database_module._migrate_plaintext_to_encrypted(
+            str(tmp_path / "postcard.db"), _CACHE_KEY
+        )
+    assert caught.value.code == "crypto_unavailable"
+
+
+@needs_sqlcipher
+def test_a_failed_verification_reraises_without_wrapping(tmp_path, monkeypatch):
+    path = tmp_path / "postcard.db"
+    plain = sqlite3.connect(str(path))
+    plain.execute("CREATE TABLE t(x)")
+    plain.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
+    plain.commit()
+    plain.close()
+    before = path.read_bytes()
+
+    def _broken(path, key, version):
+        raise CacheError("migration_failed")
+
+    monkeypatch.setattr(database_module, "_verify_encrypted", _broken)
+    with pytest.raises(CacheError) as caught:
+        database_module._migrate_plaintext_to_encrypted(str(path), _CACHE_KEY)
+
+    assert caught.value.code == "migration_failed"
+    assert path.read_bytes() == before
+    assert not (tmp_path / "postcard.db.migrating").exists()
+
+
+@needs_sqlcipher
+def test_verification_rejects_a_version_mismatch(tmp_path):
+    path = tmp_path / "postcard.db"
+    conn = database_module._sqlcipher.connect(str(path))
+    conn.execute(f"PRAGMA key = \"x'{_CACHE_KEY.hex()}'\"")
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(CacheError) as caught:
+        database_module._verify_encrypted(str(path), _CACHE_KEY, 7)
+    assert caught.value.code == "migration_failed"
+
+
+@needs_sqlcipher
+def test_default_path_builds_under_the_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        database_module.GLib, "get_user_data_dir", lambda: str(tmp_path)
+    )
+    database = Database(key=_CACHE_KEY)
+    database.close()
+
+    assert (tmp_path / "postcard" / "postcard.db").exists()
