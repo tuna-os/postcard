@@ -14,7 +14,7 @@ a bridge daemon, or assume a JMAP endpoint exists.
 | Native SDK/helper and Postcard routing | [#1](https://github.com/tuna-os/postcard/issues/1) | Experimental foundation |
 | Account setup, resumable sessions and 2FA | [#2](https://github.com/tuna-os/postcard/issues/2) | Planned |
 | Complete mailbox sync, history, bodies and attachments | [#3](https://github.com/tuna-os/postcard/issues/3) | Prototype; replies validated, live validation pending |
-| Mutations, drafts and encryption-preserving sending | [#4](https://github.com/tuna-os/postcard/issues/4) | Read/move prototype; sending unavailable |
+| Mutations, drafts and encryption-preserving sending | [#4](https://github.com/tuna-os/postcard/issues/4) | Read/move prototype; sending blocked (see below) |
 | Local-cache privacy and credential lifecycle | [#5](https://github.com/tuna-os/postcard/issues/5) | Release prerequisite |
 | Flatpak, SDK compatibility and end-to-end validation | [#6](https://github.com/tuna-os/postcard/issues/6) | Release prerequisite |
 
@@ -32,6 +32,12 @@ Decisions recorded while building the prototype:
 - Revocation is local-only. The pinned SDK exposes no logout/delete-session
   API, so removing the account clears the session from the keyring and the
   server-side session is left to expire. Revisit if the SDK gains one.
+- Sending stays unavailable. The pinned SDK's `MailFacade` has no send or
+  draft API; the only send implementation upstream lives in TutaBridge's
+  `bridge` crate (`DraftService` + `SendDraftService` with sender/recipient
+  resolution and attachment encryption), which this helper deliberately does
+  not link. Porting that flow is real crypto work and needs a live account
+  to validate, so it waits behind #5 and #6 with the rest of #4.
 
 ## Proton Mail native support — next provider
 
