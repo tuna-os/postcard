@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-03 20:14+0000\n"
+"POT-Creation-Date: 2026-11-03 23:25+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -323,80 +323,88 @@ msgstr ""
 msgid "The stored key does not unlock the mail cache."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:85
+#: src/postcard/core/net/errors.py:86
 msgid "The old mail cache could not be encrypted."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:93
+#: src/postcard/core/net/errors.py:89
+msgid "This mail cache needs a newer Postcard. Update the app to open it."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:91
+msgid "The mail cache could not be upgraded."
+msgstr ""
+
+#: src/postcard/core/net/errors.py:99
 msgid ""
 "Microsoft rejected the sign-in. Sign in again under Online Accounts in "
 "Settings."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:98
+#: src/postcard/core/net/errors.py:104
 msgid ""
 "Microsoft refused access to this mailbox. Your organization may need to "
 "allow GNOME Online Accounts to read mail."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:102
+#: src/postcard/core/net/errors.py:108
 msgid "Microsoft is busy right now. Try again in a moment."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:122
+#: src/postcard/core/net/errors.py:128
 msgid "The Microsoft sign-in expired. Reconnect the account to continue."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:124
+#: src/postcard/core/net/errors.py:130
 msgid "The Microsoft sign-in could not be completed. Try again later."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:129
+#: src/postcard/core/net/errors.py:135
 msgid "This build does not include the experimental Proton helper."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:131
+#: src/postcard/core/net/errors.py:137
 msgid "Proton sign-in failed. Check the account password."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:133
+#: src/postcard/core/net/errors.py:139
 msgid "Proton requires a valid second-factor code."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:135
+#: src/postcard/core/net/errors.py:141
 msgid "This Proton second-factor method is not supported yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:138
+#: src/postcard/core/net/errors.py:144
 msgid "This operation is not supported by the experimental Proton backend yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:140
+#: src/postcard/core/net/errors.py:146
 msgid "The experimental Proton operation failed. Try again later."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:145
+#: src/postcard/core/net/errors.py:151
 msgid "This build does not include the experimental Tuta helper."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:148
+#: src/postcard/core/net/errors.py:154
 msgid ""
 "Tuta sign-in could not be completed. Check the session and client version."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:151
+#: src/postcard/core/net/errors.py:157
 msgid "Tuta requires a valid second-factor code."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:153
+#: src/postcard/core/net/errors.py:159
 msgid "This Tuta second-factor method is not supported yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:156
+#: src/postcard/core/net/errors.py:162
 msgid "This operation is not supported by the experimental Tuta backend yet."
 msgstr ""
 
-#: src/postcard/core/net/errors.py:158
+#: src/postcard/core/net/errors.py:164
 msgid "The experimental Tuta operation failed. Try again later."
 msgstr ""
 

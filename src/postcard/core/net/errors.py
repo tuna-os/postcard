@@ -82,7 +82,13 @@ def _classify_cache(exc: CacheError) -> tuple[bool, str]:
         return False, _("This build cannot decrypt the mail cache.")
     if exc.code == "unlock_failed":
         return False, _("The stored key does not unlock the mail cache.")
-    return False, _("The old mail cache could not be encrypted.")
+    if exc.code == "migration_failed":
+        return False, _("The old mail cache could not be encrypted.")
+    if exc.code == "schema_too_new":
+        return False, _(
+            "This mail cache needs a newer Postcard. Update the app to open it."
+        )
+    return False, _("The mail cache could not be upgraded.")
 
 
 def _classify_graph(exc: GraphError) -> tuple[bool, str]:

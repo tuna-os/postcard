@@ -148,6 +148,8 @@ def test_cache_failures_are_not_auth_failures_and_leak_nothing():
         "crypto_unavailable",
         "unlock_failed",
         "migration_failed",
+        "schema_too_new",
+        "schema_upgrade_failed",
     ):
         is_auth, message = classify(CacheError(code), "host.example")
         assert not is_auth
