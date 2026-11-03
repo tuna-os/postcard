@@ -377,6 +377,16 @@ def test_a_malformed_answer_is_refused():
     assert raised.value.code == CODE_HTTP
 
 
+def test_a_shapeless_answer_body_is_refused():
+    transport = FakeTransport(reply(body=["Email/get"]))
+    jmap = JmapSession(discovered_session(), PASSWORD, transport)
+
+    with pytest.raises(JmapError) as raised:
+        jmap.request([JmapCall("Email/get", {})])
+
+    assert raised.value.code == CODE_HTTP
+
+
 def test_a_cancelled_request_never_reaches_the_network():
     transport = FakeTransport()
     jmap = JmapSession(discovered_session(), PASSWORD, transport)

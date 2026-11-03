@@ -309,9 +309,12 @@ class JmapSession:
         if response.status >= 400:
             raise _error_from(response)
         try:
-            answers = response.json().get("methodResponses", [])
+            payload = response.json()
         except ValueError:
             raise JmapError(0, CODE_HTTP, "the JMAP answer was not JSON") from None
+        if not isinstance(payload, dict):
+            raise JmapError(0, CODE_HTTP, "the JMAP answer was not JSON")
+        answers = payload.get("methodResponses", [])
         if len(answers) != len(calls) or any(
             not isinstance(answer, list) or len(answer) != 3 for answer in answers
         ):
