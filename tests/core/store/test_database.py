@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -930,3 +931,501 @@ def test_default_path_builds_under_the_data_dir(tmp_path, monkeypatch):
     database.close()
 
     assert (tmp_path / "postcard" / "postcard.db").exists()
+
+
+# --- atomic schema upgrades -------------------------------------------------
+
+
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+def _attach_memory_db() -> Database:
+    """A Database on a caller-managed :memory: connection.
+
+    The constructor always builds a fresh database, so tests that start from
+    a historical schema attach the connection themselves instead.
+    """
+    database = Database.__new__(Database)
+    database._conn = sqlite3.connect(":memory:")
+    database._conn.row_factory = sqlite3.Row
+    return database
+
+
+def _open_plaintext_file(path) -> Database:
+    """Open a plaintext file database without the crypto binding.
+
+    File persistence is what proves a failed upgrade reopens; routing every
+    such test through SQLCipher would skip it wherever the binding is missing.
+    Migrations only use the shared DB-API surface, so this runs the same
+    statements the encrypted open runs.
+    """
+    database = Database.__new__(Database)
+    database._conn = sqlite3.connect(str(path))
+    database._conn.row_factory = sqlite3.Row
+    database._conn.execute("PRAGMA journal_mode = WAL")
+    database._conn.execute("PRAGMA synchronous = NORMAL")
+    database._conn.execute("PRAGMA foreign_keys = ON")
+    return database
+
+
+def _load_fixture(conn, name: str) -> None:
+    conn.executescript((_FIXTURES_DIR / name).read_text())
+    conn.commit()
+
+
+def _schema_version(conn) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def _column_names(conn, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _normalize_ddl(sql: str) -> str:
+    """Collapse formatting SQLite itself does not preserve.
+
+    ALTER TABLE rewrites the stored CREATE TABLE with its own punctuation
+    spacing, so a hand-written historical schema can only match modulo that.
+    """
+    collapsed = re.sub(r"\s+", " ", sql)
+    return collapsed.replace(" ,", ",").replace("( ", "(").replace(" )", ")")
+
+
+def _schema_signature(conn) -> list:
+    """Every table's columns plus every schema object's normalized DDL."""
+    signature = []
+    for table in ("accounts", "folders", "emails", "contacts"):
+        columns = [tuple(row) for row in conn.execute(f"PRAGMA table_info({table})")]
+        signature.append((table, columns))
+    objects = conn.execute(
+        "SELECT type, name, sql FROM sqlite_master"
+        " WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY name"
+    ).fetchall()
+    signature.append(
+        ("objects", [(kind, name, _normalize_ddl(sql)) for kind, name, sql in objects])
+    )
+    return signature
+
+
+class _FlakyConnection:
+    """Wraps a connection, failing the statements a predicate matches."""
+
+    def __init__(self, inner, fail_when) -> None:
+        self._inner = inner
+        self._fail_when = fail_when
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def execute(self, sql, *args, **kwargs):
+        if isinstance(sql, str) and self._fail_when(sql):
+            raise sqlite3.OperationalError("injected fault")
+        return self._inner.execute(sql, *args, **kwargs)
+
+
+def test_upgrading_the_oldest_schema_preserves_everything_it_holds():
+    database = _attach_memory_db()
+    _load_fixture(database._conn, "mail_v0.sql")
+
+    database._migrate_schema()
+
+    assert _schema_version(database._conn) == len(MIGRATIONS)
+    assert [(a.email, a.display_name) for a in database.accounts()] == [
+        ("ada@example.com", "Ada"),
+        ("grace@work.example", "Grace"),
+    ]
+    folders = {f.name: f for f in database.folders_for_account(1)}
+    assert sorted(folders) == ["Drafts", "INBOX", "Outbox", "Sent"]
+    inbox = database.emails_in_folder(folders["INBOX"].id)
+    assert sorted(m.subject for m in inbox) == [
+        "Invoice 42",
+        "Lunch plans",
+        "Re: Lunch plans",
+    ]
+    flags = {m.subject: (m.is_unread, m.is_starred) for m in inbox}
+    assert flags["Re: Lunch plans"] == (True, True)
+    assert flags["Invoice 42"] == (False, False)
+    # Migration 3 backfilled addresses from contacts where it could.
+    assert {m.subject: m.sender_address for m in inbox} == {
+        "Lunch plans": "ada@example.com",
+        "Re: Lunch plans": "bob@example.com",
+        "Invoice 42": "",
+    }
+    assert {m.subject: m.conversation_id for m in inbox} == {
+        "Lunch plans": 1,
+        "Re: Lunch plans": 1,
+        "Invoice 42": None,
+    }
+    # New columns arrived with the defaults old rows were already living with.
+    (account,) = [a for a in database.accounts() if a.email == "ada@example.com"]
+    assert (account.username, account.goa_id, account.protocol) == ("", "", "imap")
+    stored = folders["INBOX"]
+    assert (stored.parent_id, stored.delimiter) == (None, "/")
+    assert (stored.role, stored.label, stored.uidvalidity) == ("", "", None)
+    assert "Ada Lovelace <ada@example.com>" in database.contact_addresses()
+    # The Outbox queue and drafts have no server id, and keep their bodies.
+    queued = database.emails_in_folder(folders["Outbox"].id)
+    assert {m.server_id for m in queued} == {None}
+    bodies = {m.subject: database.get_raw_message(m.id) for m in queued}
+    assert bodies == {
+        "Queued: trip report": b"Queued trip report body awaiting send",
+        "Queued: no body yet": None,
+    }
+    (draft,) = database.emails_in_folder(folders["Drafts"].id)
+    assert (draft.server_id, database.get_raw_message(draft.id)) == (
+        None,
+        b"Draft hello body",
+    )
+    # Rows that predated the index are searchable again (migration 6).
+    (thread,) = database.search_conversations([folders["INBOX"].id], "dessert")
+    assert (thread.subject, thread.count) == ("Re: Lunch plans", 2)
+    assert len(database.search_conversations([folders["INBOX"].id], "invoice")) == 1
+    database.close()
+
+
+def test_upgrading_a_mid_history_schema_keeps_what_earlier_migrations_built():
+    database = _attach_memory_db()
+    _load_fixture(database._conn, "mail_v5.sql")
+
+    database._migrate_schema()
+
+    assert _schema_version(database._conn) == len(MIGRATIONS)
+    folders = {f.name: f for f in database.folders_for_account(1)}
+    assert folders["Work.Projects"].parent_id == folders["Work"].id
+    assert folders["Work.Projects"].delimiter == "."
+    accounts = {a.email: a for a in database.accounts()}
+    assert accounts["grace@work.example"].goa_id == "account_1700_0"
+    assert accounts["ada@example.com"].protocol == "imap"
+    (nested,) = database.emails_in_folder(folders["Work.Projects"].id)
+    assert (nested.subject, nested.sender_address) == (
+        "Project notes",
+        "bob@example.com",
+    )
+    (reply,) = [
+        m
+        for m in database.emails_in_folder(folders["INBOX"].id)
+        if m.subject == "Re: Lunch plans"
+    ]
+    assert (reply.recipient, reply.recipient_address) == (
+        "Ada Lovelace",
+        "ada@example.com",
+    )
+    (queued,) = database.emails_in_folder(folders["Outbox"].id)
+    assert database.get_raw_message(queued.id) == (
+        b"Queued trip report body awaiting send"
+    )
+    (thread,) = database.search_conversations([folders["INBOX"].id], "lunch")
+    assert thread.count == 2
+    database.close()
+
+
+@pytest.mark.parametrize("fixture", ["mail_v0.sql", "mail_v5.sql"])
+def test_an_upgraded_fixture_matches_a_fresh_database_schema(fixture):
+    # Upgrading the oldest database in the wild must yield exactly today's
+    # schema -- any drift means a migration or a fixture stopped matching.
+    fresh = Database(":memory:")
+    upgraded = _attach_memory_db()
+    try:
+        _load_fixture(upgraded._conn, fixture)
+        upgraded._migrate_schema()
+        assert _schema_signature(upgraded._conn) == _schema_signature(fresh._conn)
+    finally:
+        fresh.close()
+        upgraded.close()
+
+
+def test_split_statements_keeps_quoted_semicolons_together():
+    assert database_module._split_statements(
+        "INSERT INTO t VALUES ('a;b');\nUPDATE t SET x = 'it''s';"
+    ) == ["INSERT INTO t VALUES ('a;b');", "UPDATE t SET x = 'it''s';"]
+
+
+def test_split_statements_tolerates_comments_and_a_missing_trailer():
+    assert database_module._split_statements(
+        "-- leading comment\nALTER TABLE t ADD COLUMN x TEXT;\n-- trailing\n"
+    ) == ["-- leading comment\nALTER TABLE t ADD COLUMN x TEXT;"]
+    assert database_module._split_statements("ALTER TABLE t ADD COLUMN x TEXT") == [
+        "ALTER TABLE t ADD COLUMN x TEXT"
+    ]
+
+
+def test_every_migration_splits_into_single_statements():
+    for sql in MIGRATIONS:
+        statements = database_module._split_statements(sql)
+        assert statements
+        for statement in statements:
+            assert database_module._split_statements(statement) == [statement]
+
+
+def test_a_failed_migration_rolls_back_to_the_previous_version(caplog):
+    database = _attach_memory_db()
+    _load_fixture(database._conn, "mail_v0.sql")
+    inner = database._conn
+    database._conn = _FlakyConnection(
+        inner, lambda sql: sql.startswith("UPDATE emails SET sender_address")
+    )
+
+    with pytest.raises(CacheError) as caught:
+        database._migrate_schema()
+
+    assert caught.value.code == "schema_upgrade_failed"
+    assert str(caught.value) == "The mail cache could not be opened."
+    assert "could not apply schema migration 3" in caplog.text
+    database._conn = inner
+    assert _schema_version(inner) == 2
+    assert "sender_address" not in _column_names(inner, "emails")
+    assert inner.execute("SELECT COUNT(*) FROM emails").fetchone()[0] == 7
+
+    database._migrate_schema()
+    assert _schema_version(inner) == len(MIGRATIONS)
+    assert len(database.emails_in_folder(1)) == 3
+    database.close()
+
+
+def test_a_lost_version_write_rolls_back_the_schema_change():
+    # The reported failure: the schema committed, then the separate version
+    # bump failed, and every later open retried onto the half-applied schema.
+    database = _attach_memory_db()
+    _load_fixture(database._conn, "mail_v0.sql")
+    inner = database._conn
+    database._conn = _FlakyConnection(
+        inner, lambda sql: sql.startswith("PRAGMA user_version =")
+    )
+
+    with pytest.raises(CacheError) as caught:
+        database._migrate_schema()
+
+    assert caught.value.code == "schema_upgrade_failed"
+    database._conn = inner
+    assert _schema_version(inner) == 0
+    assert "parent_id" not in _column_names(inner, "folders")
+
+    database._migrate_schema()
+    assert _schema_version(inner) == len(MIGRATIONS)
+    assert len(database.accounts()) == 2
+    database.close()
+
+
+def test_a_failed_upgrade_reopens_from_the_last_complete_migration(tmp_path):
+    path = tmp_path / "postcard.db"
+    setup = _open_plaintext_file(path)
+    _load_fixture(setup._conn, "mail_v0.sql")
+    setup.close()
+
+    failing = _open_plaintext_file(path)
+    inner = failing._conn
+    failing._conn = _FlakyConnection(
+        inner, lambda sql: sql.startswith("ALTER TABLE accounts ADD COLUMN goa_id")
+    )
+    with pytest.raises(CacheError):
+        failing._migrate_schema()
+    failing._conn = inner
+    failing.close()
+
+    resumed = _open_plaintext_file(path)
+    assert _schema_version(resumed._conn) == 4
+    assert "goa_id" not in _column_names(resumed._conn, "accounts")
+    assert resumed._conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] == 7
+
+    resumed._migrate_schema()
+    assert _schema_version(resumed._conn) == len(MIGRATIONS)
+    assert [a.email for a in resumed.accounts()] == [
+        "ada@example.com",
+        "grace@work.example",
+    ]
+    (thread,) = resumed.search_conversations([1], "dessert")
+    assert thread.count == 2
+    resumed.close()
+
+
+def test_a_crash_mid_migration_reopens_on_the_previous_version(tmp_path):
+    path = tmp_path / "postcard.db"
+    setup = _open_plaintext_file(path)
+    _load_fixture(setup._conn, "mail_v0.sql")
+    setup.close()
+
+    # A crash anywhere inside the migration's transaction -- here, right after
+    # its first statement -- can only lose that uncommitted migration.
+    root = Path(__file__).resolve().parents[3]
+    crasher = (
+        "import os, sqlite3, sys;"
+        " sys.path.insert(0, 'src');"
+        " from postcard.core.store.database import MIGRATIONS, _split_statements;"
+        " conn = sqlite3.connect(sys.argv[1]);"
+        " conn.execute('BEGIN IMMEDIATE');"
+        " conn.execute(_split_statements(MIGRATIONS[0])[0]);"
+        " os._exit(1)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", crasher, str(path)],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+
+    reopened = _open_plaintext_file(path)
+    assert _schema_version(reopened._conn) == 0
+    assert "parent_id" not in _column_names(reopened._conn, "folders")
+    assert reopened._conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] == 7
+
+    reopened._migrate_schema()
+    assert _schema_version(reopened._conn) == len(MIGRATIONS)
+    assert len(reopened.accounts()) == 2
+    reopened.close()
+
+
+def test_a_newer_schema_is_refused_and_left_untouched(tmp_path):
+    path = tmp_path / "postcard.db"
+    database = _open_plaintext_file(path)
+    database._create_tables()
+    database._migrate_schema()
+    account = database.save_account("a@x", "A", "imap.x", 993, "smtp.x", 587)
+    folder = database.get_or_create_folder(account.id, "INBOX")
+    mail = database.save_email(folder.id, "Ada", "Hi", "", "2026-01-01", True)
+    database.save_raw_message(mail.id, b"From: ada@x stating hi")
+    database._conn.execute(f"PRAGMA user_version = {len(MIGRATIONS) + 1}")
+    database._conn.commit()
+    database.close()
+
+    refused = _open_plaintext_file(path)
+    with pytest.raises(CacheError) as caught:
+        refused._migrate_schema()
+    assert caught.value.code == "schema_too_new"
+    assert str(caught.value) == "The mail cache could not be opened."
+    assert _schema_version(refused._conn) == len(MIGRATIONS) + 1
+    assert refused._conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] == 1
+    refused.close()
+
+    # The refusal damaged nothing: back at a supported version it opens whole.
+    repaired = _open_plaintext_file(path)
+    repaired._conn.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
+    repaired._conn.commit()
+    repaired._migrate_schema()
+    assert repaired.get_raw_message(mail.id) == b"From: ada@x stating hi"
+    repaired.close()
+
+
+@needs_sqlcipher
+def test_a_plaintext_v0_profile_converts_and_upgrades(tmp_path):
+    path = tmp_path / "postcard.db"
+    plain = sqlite3.connect(str(path))
+    _load_fixture(plain, "mail_v0.sql")
+    plain.close()
+
+    database = Database(str(path), key=_CACHE_KEY)
+
+    stored = path.read_bytes()
+    assert not stored.startswith(b"SQLite format 3\x00")
+    assert b"Lunch plans" not in stored
+    assert _schema_version(database._conn) == len(MIGRATIONS)
+    assert [a.email for a in database.accounts()] == [
+        "ada@example.com",
+        "grace@work.example",
+    ]
+    outbox = database.get_folder_by_name(1, "Outbox")
+    assert outbox is not None
+    queued = database.emails_in_folder(outbox.id)
+    assert {m.server_id for m in queued} == {None}
+    bodies = {m.subject: database.get_raw_message(m.id) for m in queued}
+    assert bodies["Queued: trip report"] == b"Queued trip report body awaiting send"
+    inbox = database.get_folder_by_name(1, "INBOX")
+    assert inbox is not None
+    (thread,) = database.search_conversations([inbox.id], "dessert")
+    assert thread.count == 2
+    database.close()
+
+    reopened = Database(str(path), key=_CACHE_KEY)
+    assert len(reopened.accounts()) == 2
+    reopened.close()
+
+
+@needs_sqlcipher
+def test_a_failed_encrypted_upgrade_resumes_on_reopen(tmp_path, monkeypatch):
+    path = tmp_path / "postcard.db"
+    plain = sqlite3.connect(str(path))
+    _load_fixture(plain, "mail_v5.sql")
+    plain.close()
+    database_module._migrate_plaintext_to_encrypted(str(path), _CACHE_KEY)
+
+    opened = []
+    real_open = database_module._open_encrypted
+
+    def flaky_open(db_path, key):
+        conn = real_open(db_path, key)
+        opened.append(conn)
+        return _FlakyConnection(
+            conn,
+            lambda sql: sql == "ALTER TABLE folders ADD COLUMN uidvalidity INTEGER",
+        )
+
+    monkeypatch.setattr(database_module, "_open_encrypted", flaky_open)
+    with pytest.raises(CacheError) as caught:
+        Database(str(path), key=_CACHE_KEY)
+    assert caught.value.code == "schema_upgrade_failed"
+    for conn in opened:
+        conn.close()
+    monkeypatch.undo()
+
+    probe = database_module._open_encrypted(str(path), _CACHE_KEY)
+    assert _schema_version(probe) == 9
+    assert "uidvalidity" not in _column_names(probe, "folders")
+    probe.close()
+
+    resumed = Database(str(path), key=_CACHE_KEY)
+    assert _schema_version(resumed._conn) == len(MIGRATIONS)
+    folders = {f.name: f for f in resumed.folders_for_account(1)}
+    assert folders["Work.Projects"].parent_id == folders["Work"].id
+    (thread,) = resumed.search_conversations([folders["INBOX"].id], "lunch")
+    assert thread.count == 2
+    resumed.close()
+
+
+@needs_sqlcipher
+def test_a_broken_plaintext_profile_is_left_byte_identical(tmp_path):
+    path = tmp_path / "postcard.db"
+    plain = sqlite3.connect(str(path))
+    _load_fixture(plain, "mail_v0.sql")
+    plain.close()
+    stored = bytearray(path.read_bytes())
+    stored[128:384] = b"\x00" * 256
+    path.write_bytes(bytes(stored))
+    before = path.read_bytes()
+
+    with pytest.raises(CacheError) as caught:
+        Database(str(path), key=_CACHE_KEY)
+
+    assert caught.value.code == "migration_failed"
+    assert path.read_bytes() == before
+    assert not (tmp_path / "postcard.db.migrating").exists()
+
+
+@needs_sqlcipher
+def test_a_newer_encrypted_schema_is_refused_without_touching_mail(tmp_path):
+    path = str(tmp_path / "postcard.db")
+    database = Database(path, key=_CACHE_KEY)
+    account = database.save_account("a@x", "A", "imap.x", 993, "smtp.x", 587)
+    folder = database.get_or_create_folder(account.id, "INBOX")
+    mail = database.save_email(
+        folder.id, "Ada", "Hi", "", "2026-01-01", True, server_id="1"
+    )
+    database.save_raw_message(mail.id, b"From: ada@x stating hi")
+    database.close()
+
+    bump = database_module._open_encrypted(path, _CACHE_KEY)
+    bump.execute(f"PRAGMA user_version = {len(MIGRATIONS) + 1}")
+    bump.commit()
+    bump.close()
+
+    with pytest.raises(CacheError) as caught:
+        Database(path, key=_CACHE_KEY)
+    assert caught.value.code == "schema_too_new"
+
+    repair = database_module._open_encrypted(path, _CACHE_KEY)
+    repair.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
+    repair.commit()
+    repair.close()
+    reopened = Database(path, key=_CACHE_KEY)
+    assert reopened.get_raw_message(mail.id) == b"From: ada@x stating hi"
+    assert [m.subject for m in reopened.emails_in_folder(folder.id)] == ["Hi"]
+    reopened.close()

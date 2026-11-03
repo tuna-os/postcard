@@ -93,7 +93,9 @@ def _sent_key(mail: Email) -> float:
 
 # Schema changes since the first release, applied in order. How many have run
 # is stored in PRAGMA user_version. Only ever append -- editing or reordering
-# these would give databases in the wild a different schema to new ones.
+# these would give databases in the wild a different schema to new ones. Each
+# entry runs inside one transaction together with its version bump, so an
+# entry holds plain schema/data statements only, never BEGIN or COMMIT.
 MIGRATIONS = [
     "ALTER TABLE folders ADD COLUMN parent_id INTEGER REFERENCES folders(id)",
     "ALTER TABLE folders ADD COLUMN delimiter TEXT NOT NULL DEFAULT '/'",
@@ -128,6 +130,29 @@ MIGRATIONS = [
     # NULL until the next sync reads it; see set_folder_uidvalidity.
     "ALTER TABLE folders ADD COLUMN uidvalidity INTEGER",
 ]
+
+
+def _split_statements(script: str) -> list[str]:
+    """Split one migration script into the single statements it holds.
+
+    A migration runs inside an explicit transaction, which rules out
+    executescript (it commits first). Splitting on ";" alone would break a
+    string literal holding one, so a semicolon only counts where
+    sqlite3.complete_statement agrees the statement is finished.
+    """
+    statements: list[str] = []
+    pending = ""
+    for char in script:
+        pending += char
+        if char == ";" and sqlite3.complete_statement(pending):
+            statements.append(pending.strip())
+            pending = ""
+    tail = pending.strip()
+    if any(
+        line.strip() and not line.strip().startswith("--") for line in tail.splitlines()
+    ):
+        statements.append(tail)
+    return statements
 
 
 def _is_plaintext(path: str) -> bool:
@@ -338,10 +363,34 @@ class Database:
 
     def _migrate_schema(self) -> None:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        for i, sql in enumerate(MIGRATIONS[version:], start=version + 1):
-            self._conn.executescript(sql)
-            self._conn.execute(f"PRAGMA user_version = {i}")
-        self._conn.commit()
+        if version > len(MIGRATIONS):
+            logger.warning(
+                "mail cache schema version %d is newer than this Postcard",
+                version,
+            )
+            raise CacheError("schema_too_new")
+        for number, sql in enumerate(MIGRATIONS[version:], start=version + 1):
+            self._apply_migration(number, sql)
+
+    def _apply_migration(self, number: int, sql: str) -> None:
+        """Apply one migration and record its version as a single transaction.
+
+        The statements and the user_version bump share one transaction, so a
+        failure anywhere -- a bad statement, a lost version write, a crash --
+        leaves the previous version's schema and mail intact, and reopening
+        resumes from the last completed migration.
+        """
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            for statement in _split_statements(sql):
+                self._conn.execute(statement)
+            self._conn.execute(f"PRAGMA user_version = {number:d}")
+            self._conn.execute("COMMIT")
+        except Exception as error:
+            with suppress(Exception):
+                self._conn.execute("ROLLBACK")
+            logger.warning("could not apply schema migration %d", number, exc_info=True)
+            raise CacheError("schema_upgrade_failed") from error
 
     def _account_from_row(self, row: sqlite3.Row) -> Account:
         return Account(
