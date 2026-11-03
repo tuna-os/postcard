@@ -121,3 +121,20 @@ def test_missing_helper_is_explicit():
     with patch("shutil.which", return_value=None), pytest.raises(ProtonError) as caught:
         helper_transport({})
     assert caught.value.code == "helper_missing"
+
+
+def test_compiled_helper_speaks_the_pinned_contract_without_network():
+    import os
+
+    binary = os.environ.get("POSTCARD_PROTON_TEST_BINARY")
+    if not binary:
+        reason = "set POSTCARD_PROTON_TEST_BINARY to run the compiled helper contract"
+        pytest.skip(reason)
+    with patch("shutil.which", return_value=binary):
+        reply = helper_transport({"version": 2, "op": "login"})
+        assert reply == {"version": 1, "error": {"code": "unsupported_version"}}
+        reply = helper_transport({"version": 1, "op": "sync", "session": SESSION})
+        assert reply == {"version": 1, "error": {"code": "unsupported_operation"}}
+        with pytest.raises(ProtonError) as caught:
+            ProtonSession(CREDENTIAL).request("send")
+    assert caught.value.code == "invalid_request"
