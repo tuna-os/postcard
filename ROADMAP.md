@@ -82,7 +82,10 @@ What remains, in order:
 ## Local-cache privacy — the encrypted-at-rest plan
 
 All providers share one SQLite cache, currently plaintext: message bodies,
-FTS text, contacts and threading headers. The plan, tracked in #5:
+FTS text, contacts and threading headers. Already in place: the process runs
+under umask 077 and every database open re-tightens the cache directory and
+database files (including WAL sidecars, which do not inherit the database
+file's mode) to owner-only. The full plan, tracked in #5:
 
 - Encrypt the database file with SQLCipher, keyed by a random key generated
   once and held in the keyring beside the account passwords.

@@ -29,6 +29,9 @@ def _configure_logging() -> None:
 
 
 def main(version: str) -> int:
+    # Owner-only file creation for the whole process: the SQLite cache and the
+    # WAL sidecars SQLite names itself must never be world-readable.
+    os.umask(0o077)
     _configure_logging()
     app = PostcardApplication(version)
     return app.run(sys.argv)

@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 import sqlite3
@@ -18,6 +19,8 @@ from ..models.conversation import Conversation
 from ..models.email import Email
 from ..models.folder import Folder
 from ..models.message_header import MessageHeader
+
+logger = logging.getLogger(__name__)
 
 # Every column _email_from_row reads
 _EMAIL_COLUMNS = """
@@ -104,6 +107,28 @@ MIGRATIONS = [
 ]
 
 
+def restrict_cache_permissions(path: str) -> None:
+    """Make the cache directory and database files owner-only.
+
+    Covers caches created before the process umask was restricted, and the
+    sidecars SQLite manages itself (-wal, -shm, -journal), which do not
+    inherit the database file's mode. Missing files are normal; anything else
+    is logged rather than fatal, since permissions never matter more than the
+    mail itself.
+    """
+    try:
+        os.chmod(os.path.dirname(os.path.abspath(path)), 0o700)
+    except OSError:
+        logger.warning("could not restrict the cache directory", exc_info=True)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            os.chmod(path + suffix, 0o600)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("could not restrict %s", path + suffix, exc_info=True)
+
+
 class Database:
     def __init__(self, path: str | None = None) -> None:
         if path is None:
@@ -123,6 +148,8 @@ class Database:
 
         self._create_tables()
         self._migrate_schema()
+        if path != ":memory:":
+            restrict_cache_permissions(path)
 
     def close(self) -> None:
         self._conn.close()

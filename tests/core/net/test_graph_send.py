@@ -71,7 +71,11 @@ def test_split_attachments_detaches_files_and_keeps_the_body():
     ]
     parsed = email.message_from_bytes(body, policy=policy.default)
     assert list(parsed.iter_attachments()) == []
-    assert parsed["Message-ID"] == email.message_from_bytes(raw)["Message-ID"]
+    # Same policy on both sides: the generated Message-ID folds, and the two
+    # policies unfold a fold in different places, so the comparison used to
+    # depend on the timestamp the ID was generated with.
+    original = email.message_from_bytes(raw, policy=policy.default)
+    assert parsed["Message-ID"] == original["Message-ID"]
     assert b"Hi" in body
 
 
