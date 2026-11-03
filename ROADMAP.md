@@ -57,8 +57,10 @@ must be verified rather than inferred from library availability.
 
 The `proton` protocol id is already reserved: Proton account rows fail closed
 with a friendly "not supported yet" instead of falling through to IMAP, and
-their inbox watcher polls. The real session module replaces the
-`proton_session.py` stub when the proof of concept lands.
+their inbox watcher polls. `proton_session.py` pins the helper IPC contract
+the future binary must speak (same stdio shape as Tuta: versioned JSON,
+stdin-only secrets, fixed error vocabulary), with the adapter tested against
+fixtures. What remains is the helper itself plus reply mapping and routing.
 
 ## Native Microsoft 365 — sign in without Online Accounts
 
