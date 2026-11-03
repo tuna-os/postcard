@@ -1,3 +1,5 @@
+import os
+import stat
 from datetime import datetime
 
 import pytest
@@ -9,6 +11,7 @@ from postcard.core.store.database import (
     _arrival_key,
     _fts_query,
     _sent_key,
+    restrict_cache_permissions,
 )
 
 
@@ -687,3 +690,57 @@ def test_arrival_key_orders_opaque_graph_ids_by_date():
     newer = _email(server_id="AAMkB=", date="2026-09-02T08:00:00+00:00")
 
     assert _arrival_key(older) < _arrival_key(newer)
+
+
+# --- cache permissions ------------------------------------------------------
+
+
+def mode_of(path):
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def test_opening_a_database_leaves_it_owner_only(tmp_path):
+    path = str(tmp_path / "postcard.db")
+    os.chmod(tmp_path, 0o755)
+
+    database = Database(path)
+    database.close()
+
+    assert mode_of(tmp_path) == 0o700
+    assert mode_of(path) == 0o600
+
+
+def test_a_pre_existing_world_readable_cache_is_tightened(tmp_path):
+    path = str(tmp_path / "postcard.db")
+    Database(path).close()
+    os.chmod(tmp_path, 0o755)
+    os.chmod(path, 0o644)
+
+    Database(path).close()
+
+    assert mode_of(tmp_path) == 0o700
+    assert mode_of(path) == 0o600
+
+
+def test_sqlite_sidecars_are_tightened_too(tmp_path):
+    path = tmp_path / "postcard.db"
+    path.write_bytes(b"")
+    for suffix in ("-wal", "-shm", "-journal"):
+        (tmp_path / f"postcard.db{suffix}").write_bytes(b"")
+    os.chmod(tmp_path, 0o755)
+    os.chmod(path, 0o644)
+    for suffix in ("-wal", "-shm", "-journal"):
+        os.chmod(tmp_path / f"postcard.db{suffix}", 0o644)
+
+    restrict_cache_permissions(str(path))
+
+    assert mode_of(tmp_path) == 0o700
+    assert mode_of(path) == 0o600
+    for suffix in ("-wal", "-shm", "-journal"):
+        assert mode_of(tmp_path / f"postcard.db{suffix}") == 0o600
+
+
+def test_missing_sidecars_are_normal_not_an_error(tmp_path, caplog):
+    restrict_cache_permissions(str(tmp_path / "postcard.db"))
+
+    assert "could not restrict" not in caplog.text
