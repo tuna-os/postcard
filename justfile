@@ -21,6 +21,9 @@ version  := `grep -m1 "version:" meson.build | sed -E "s/.*'([^']+)'.*/\1/"`
 # flatpak-builder writes its build tree + local repo here (kept out of git).
 fp-builddir := ".flatpak/build"
 fp-repo     := ".flatpak/repo"
+# Pure-Python pytest for the sandboxed GUI run (kept out of git). It lives in
+# the repo tree because the sandbox has a private /tmp.
+fp-pytest   := ".flatpak/pytest-libs"
 bundle      := "postcard-" + version + ".flatpak"
 
 # A plain host meson build dir, used ONLY by `pot` to regenerate translations.
@@ -118,6 +121,14 @@ check:
 # lint or type error blocks the Flatpak build too.
 test *ARGS: check
     {{python}} -m pytest {{ARGS}}
+
+# Run the GTK suite inside the installed Flatpak under Xvfb — the same shape
+# CI's gui-tests.yml runs. Needs the app installed (build) and xvfb.
+test-gui: build
+    python3 -m pip install -q --target="{{fp-pytest}}" pytest
+    xvfb-run -a flatpak run --filesystem="$PWD" \
+        --env=PYTHONPATH="$PWD/src:$PWD/{{fp-pytest}}" \
+        --command=python3 "{{app-id}}" -m pytest "$PWD/tests/gui/" -v
 
 # Regenerate the .pot translation template. Opt-in dev tool: needs `meson`,
 # `ninja`, and `gettext` on the host (not required for `build`/`run`).

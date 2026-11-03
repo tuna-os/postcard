@@ -1,9 +1,7 @@
 """Native Microsoft onboarding, exercised where the Adw typelib exists.
 
-Skips on the host (no display) and in CI. Run inside the Flatpak under Xvfb:
-
-    xvfb-run -a flatpak run --command=bash in.gxanshu.postcard \\
-        -c "python3 -m pip install -q --user pytest && <this file> ..."
+Runs in CI's gui-tests.yml and locally via `just test-gui`: inside the
+installed Flatpak under Xvfb. Skips anywhere without a display.
 """
 
 import os
