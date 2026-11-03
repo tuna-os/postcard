@@ -166,6 +166,27 @@ def test_a_session_cannot_resume_a_shapeless_secret():
     assert caught.value.code == "invalid_request"
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "login_failed",
+        "second_factor_required",
+        "invalid_totp",
+        "unsupported_second_factor",
+        "second_factor_failed",
+        "request_failed",
+        "timeout",
+    ],
+)
+def test_helper_failure_codes_reach_the_caller_verbatim(code):
+    def transport(request):
+        return {"version": 1, "error": {"code": code}}
+
+    with pytest.raises(ProtonError) as caught:
+        login(SESSION["login"], "fixture-password", transport=transport)
+    assert caught.value.code == code
+
+
 def test_compiled_helper_speaks_the_pinned_contract_without_network():
     import os
 

@@ -49,6 +49,10 @@ ERROR_CODES = frozenset(
         "unsupported_version",
         "invalid_request",
         "login_failed",
+        "second_factor_required",
+        "invalid_totp",
+        "unsupported_second_factor",
+        "second_factor_failed",
         "request_failed",
         "timeout",
         "unsupported_operation",
@@ -112,8 +116,10 @@ def login(
 ) -> Credential:
     """Return a resumable session for libsecret; do not persist the password.
 
-    The helper proves the SRP login and unlocks the mailbox keys; this side
-    only checks the session belongs to the address it was requested for.
+    The helper proves the SRP login (plus a TOTP challenge when the account
+    sets one) and returns the tokens later operations resume from; mailbox
+    keys stay locked until sync first needs to decrypt. This side only
+    checks the session belongs to the address it was requested for.
     """
     result = _request(transport, "login", email=email, password=password, totp=totp)
     session = result.get("session")
