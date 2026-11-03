@@ -85,7 +85,8 @@ The GTK half is built and verified in the Flatpak under Xvfb: a Microsoft 365
 dialog (email + display name, browser handoff, waiting page, error toasts)
 reachable from the Accounts dialog and the welcome page, with its entry points
 hidden until an app is registered. Its tests live in `tests/gui/` and run in
-the sandbox; they skip on hosts without a display.
+CI's gui-tests.yml (Flatpak build, sandboxed pytest under Xvfb) and locally
+via `just test-gui`; they skip on hosts without a display.
 
 What remains, in order:
 

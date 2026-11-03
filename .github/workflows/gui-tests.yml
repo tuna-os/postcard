@@ -1,0 +1,60 @@
+name: GUI tests
+
+# The GTK suite only runs where the Adw typelib exists (inside the Flatpak)
+# and where a display exists (under Xvfb), so it gets its own job: build the
+# Flatpak exactly as it ships, then run pytest in the sandbox with the repo
+# exposed and a pure-Python pytest on PYTHONPATH. The sandbox has a private
+# /tmp, so pytest is installed into the repo tree (gitignored), not /tmp.
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/gui/**'
+      - 'in.gxanshu.postcard.json'
+      - '.github/workflows/gui-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Flatpak tooling and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder xvfb
+
+      # The runtime + SDK download dwarfs the build; the user installation
+      # lives entirely under ~/.local/share/flatpak and is cache-safe.
+      - name: Restore the Flatpak runtime cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-${{ hashFiles('in.gxanshu.postcard.json') }}
+
+      - name: Add Flathub and install the runtime + SDK
+        run: |
+          flatpak remote-add --if-not-exists --user \
+            flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak-builder --install-deps-from=flathub --install-deps-only \
+            --user .flatpak/build in.gxanshu.postcard.json
+
+      # No --disable-updates: a fresh runner has no cloned sources to trust.
+      - name: Build and install the Flatpak
+        run: |
+          flatpak-builder --force-clean --user --install \
+            .flatpak/build in.gxanshu.postcard.json
+
+      # Installed with pip rather than `just test-gui` so CI needs no `just`.
+      - name: Run the GUI suite inside the sandbox under Xvfb
+        run: |
+          python3 -m pip install --target="$PWD/.flatpak/pytest-libs" pytest
+          xvfb-run -a flatpak run --filesystem="$PWD" \
+            --env=PYTHONPATH="$PWD/src:$PWD/.flatpak/pytest-libs" \
+            --command=python3 in.gxanshu.postcard \
+            -m pytest "$PWD/tests/gui/" -v
