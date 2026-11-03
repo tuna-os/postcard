@@ -34,6 +34,15 @@ template $PostcardAccountsDialog: Adw.Dialog {
                           }
                       }
                   }
+
+                Adw.PreferencesGroup {
+                    Gtk.Button microsoft_button {
+                        label: _("Add Microsoft 365 Account");
+                        halign: center;
+
+                        styles ["pill"]
+                      }
+                  }
               };
           };
       };

@@ -76,15 +76,18 @@ together into one worker-thread call the GTK layer can drive with an injected
 browser opener. Mail itself keeps going over the existing Graph modules
 unchanged.
 
+The GTK half is built and verified in the Flatpak under Xvfb: a Microsoft 365
+dialog (email + display name, browser handoff, waiting page, error toasts)
+reachable from the Accounts dialog and the welcome page, with its entry points
+hidden until an app is registered. Its tests live in `tests/gui/` and run in
+the sandbox; they skip on hosts without a display.
+
 What remains, in order:
 
 1. Register an Entra application for Postcard and fill in `MS_CLIENT_ID`. The
    id is public, not a secret — PKCE replaces the client secret a shipped app
    cannot keep.
-2. Build the GTK half: call `ms_login.log_in` on a worker thread with a
-   main-loop browser opener, store the returned refresh token, and add the
-   onboarding UI.
-3. Add re-authentication UX for refused refresh tokens, and reword the Graph
+2. Add re-authentication UX for refused refresh tokens, and reword the Graph
    401 message, which currently assumes the token came from Online Accounts.
 
 ## Local-cache privacy — the encrypted-at-rest plan

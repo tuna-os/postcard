@@ -33,10 +33,11 @@ from .core.models.attachment import Attachment
 from .core.models.conversation import Conversation
 from .core.models.email import Email
 from .core.models.folder import Folder
-from .core.net import errors, imap_session
+from .core.net import errors, imap_session, ms_oauth
 from .core.store.database import Database
 from .folder_row import FolderRow
 from .message_view import LoadCallback, MessageView
+from .microsoft_dialog import PostcardMicrosoftDialog
 from .online_accounts_dialog import PostcardOnlineAccountsDialog
 from .window_types import (
     ALL_INBOXES_ID,
@@ -129,6 +130,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     main_stack: Gtk.Stack = Gtk.Template.Child()
     add_account_button: Gtk.Button = Gtk.Template.Child()
     online_accounts_button: Gtk.Button = Gtk.Template.Child()
+    microsoft_button: Gtk.Button = Gtk.Template.Child()
     refresh_button: Gtk.Button = Gtk.Template.Child()
     search_bar: Gtk.SearchBar = Gtk.Template.Child()
     search_entry: Gtk.SearchEntry = Gtk.Template.Child()
@@ -264,6 +266,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _connect_widgets(self) -> None:
         self.add_account_button.connect("clicked", self._on_add_account_clicked)
         self.online_accounts_button.connect("clicked", self._on_online_accounts_clicked)
+        self.microsoft_button.connect("clicked", self._on_microsoft_clicked)
+        self.microsoft_button.set_visible(bool(ms_oauth.MS_CLIENT_ID))
         self.refresh_button.connect("clicked", self._on_refresh_clicked)
         self.compose_button.connect("clicked", self._on_compose_clicked)
         self.reply_all_button.connect("clicked", self._on_reply_all_clicked)
@@ -554,6 +558,11 @@ class PostcardMainWindow(Adw.ApplicationWindow):
 
     def _on_online_accounts_clicked(self, *_args: object) -> None:
         dialog = PostcardOnlineAccountsDialog(self._db)
+        dialog.connect("account-added", self._on_account_added)
+        dialog.present(self)
+
+    def _on_microsoft_clicked(self, *_args: object) -> None:
+        dialog = PostcardMicrosoftDialog(self._db)
         dialog.connect("account-added", self._on_account_added)
         dialog.present(self)
 

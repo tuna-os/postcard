@@ -44,6 +44,9 @@ max-args = 5
 "src/postcard/core/avatars.py" = ["E402"]
 "src/postcard/core/secrets.py" = ["E402"]
 "tests/core/test_avatars.py" = ["E402"]
+# GUI tests import gi.repository only after proving the typelibs and a display
+# exist, so their require_version gate sits below the import threshold too.
+"tests/gui/*" = ["E402"]
 
 # A test double has to match the signature of the thing it stands in for, so
 # the arguments it ignores are load-bearing. SLF001: tests legitimately reach

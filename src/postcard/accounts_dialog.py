@@ -5,7 +5,9 @@ from gi.repository import Adw, Gtk
 from . import mail_sync
 from .account_dialog import PostcardAccountDialog
 from .core import secrets
+from .core.net import ms_oauth
 from .core.store.database import Database
+from .microsoft_dialog import PostcardMicrosoftDialog
 from .online_accounts_dialog import PostcardOnlineAccountsDialog
 
 
@@ -16,6 +18,7 @@ class PostcardAccountsDialog(Adw.Dialog):
     accounts_group: Adw.PreferencesGroup = Gtk.Template.Child()
     add_button: Gtk.Button = Gtk.Template.Child()
     online_accounts_button: Gtk.Button = Gtk.Template.Child()
+    microsoft_button: Gtk.Button = Gtk.Template.Child()
 
     def __init__(self, db: Database) -> None:
         super().__init__()
@@ -24,6 +27,9 @@ class PostcardAccountsDialog(Adw.Dialog):
 
         self.add_button.connect("clicked", self._on_add_clicked)
         self.online_accounts_button.connect("clicked", self._on_online_accounts_clicked)
+        self.microsoft_button.connect("clicked", self._on_microsoft_clicked)
+        # No Entra registration, no button: the flow cannot complete yet.
+        self.microsoft_button.set_visible(bool(ms_oauth.MS_CLIENT_ID))
         self._reload()
 
     def _reload(self) -> None:
@@ -59,5 +65,10 @@ class PostcardAccountsDialog(Adw.Dialog):
 
     def _on_online_accounts_clicked(self, _button: Gtk.Button) -> None:
         dialog = PostcardOnlineAccountsDialog(self._db)
+        dialog.connect("account-added", lambda _d: self._reload())
+        dialog.present(self)
+
+    def _on_microsoft_clicked(self, _button: Gtk.Button) -> None:
+        dialog = PostcardMicrosoftDialog(self._db)
         dialog.connect("account-added", lambda _d: self._reload())
         dialog.present(self)
