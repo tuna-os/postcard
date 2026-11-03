@@ -72,7 +72,7 @@ jobs:
       - name: Set up the build environment
         run: |
           # A container has no machine-id (dbus won't start) and no /dev/fuse.
-          cat /proc/sys/kernel/random/uuid | tr -d '-' > /etc/machine-id
+          tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
           echo "${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}" | base64 -d | gpg --import
 
       # Commits are signed here, not at merge time: `ostree pull-local` copies
@@ -141,7 +141,7 @@ jobs:
 
       - name: Set up the build environment
         run: |
-          cat /proc/sys/kernel/random/uuid | tr -d '-' > /etc/machine-id
+          tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
           echo "${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}" | base64 -d | gpg --import
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

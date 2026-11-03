@@ -57,13 +57,17 @@ jobs:
           # justfile recipe and the tests.yml comment: bump both together).
           jst=$(grep -m1 -oE 'PyGObject-stubs==[0-9.]+' justfile | cut -d= -f3)
           ci=$(grep -m1 -oE 'PyGObject-stubs==[0-9.]+' .github/workflows/tests.yml | cut -d= -f3)
-          [ -n "$jst" ] && [ -n "$ci" ] || note "could not find the PyGObject-stubs pin in the justfile and tests.yml"
+          if [ -z "$jst" ] || [ -z "$ci" ]; then
+            note "could not find the PyGObject-stubs pin in the justfile and tests.yml"
+          fi
           [ "$jst" = "$ci" ] || note "PyGObject-stubs drift: justfile has $jst, tests.yml has $ci"
 
           # Go toolchain: proton-native.yml must match native/proton/go.mod.
           ci=$(grep -m1 -oE "go-version: '[0-9.]+" .github/workflows/proton-native.yml | grep -oE '[0-9.]+$')
           mod=$(grep -m1 -oE '^go [0-9.]+' native/proton/go.mod | cut -d' ' -f2)
-          [ -n "$ci" ] && [ -n "$mod" ] || note "could not find the Go pin in proton-native.yml and native/proton/go.mod"
+          if [ -z "$ci" ] || [ -z "$mod" ]; then
+            note "could not find the Go pin in proton-native.yml and native/proton/go.mod"
+          fi
           [ "$ci" = "$mod" ] || note "Go drift: proton-native.yml has $ci, native/proton/go.mod has $mod"
 
           # Rust toolchain: one version across the tuta-native.yml steps, and
@@ -273,8 +277,9 @@ jobs:
               fi
             fi
           fi
-          [ "$SECS" -gt 600 ] \
-            && echo "- suite took ${SECS}s, over the 600s budget" >> health/perf.md || true
+          if [ "$SECS" -gt 600 ]; then
+            echo "- suite took ${SECS}s, over the 600s budget" >> health/perf.md
+          fi
           new_baseline="<!-- baseline: tests=$TESTS seconds=$SECS -->"
 
           for slug in pins drift release-smoke stale-failures perf; do
