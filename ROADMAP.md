@@ -13,7 +13,7 @@ a bridge daemon, or assume a JMAP endpoint exists.
 | --- | --- | --- |
 | Native SDK/helper and Postcard routing | [#1](https://github.com/tuna-os/postcard/issues/1) | Experimental foundation |
 | Account setup, resumable sessions and 2FA | [#2](https://github.com/tuna-os/postcard/issues/2) | Planned |
-| Complete mailbox sync, history, bodies and attachments | [#3](https://github.com/tuna-os/postcard/issues/3) | Prototype; replies validated, live harness ready (`tests/live/`), account run pending |
+| Complete mailbox sync, history, bodies and attachments | [#3](https://github.com/tuna-os/postcard/issues/3) | Live-validated: login+TOTP, folders, sync pages, decryption (`tests/live/`) |
 | Mutations, drafts and encryption-preserving sending | [#4](https://github.com/tuna-os/postcard/issues/4) | Read/move prototype; sending blocked (see below) |
 | Local-cache privacy and credential lifecycle | [#5](https://github.com/tuna-os/postcard/issues/5) | Done: SQLCipher cache, keyring key, migration |
 | Flatpak, SDK compatibility and end-to-end validation | [#6](https://github.com/tuna-os/postcard/issues/6) | Release prerequisite |
