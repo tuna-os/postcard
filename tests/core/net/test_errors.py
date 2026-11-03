@@ -5,7 +5,10 @@ from postcard.core.net import errors
 from postcard.core.net.errors import classify
 from postcard.core.net.graph_session import GraphError
 from postcard.core.net.imap_session import ImapError
+from postcard.core.net.ms_oauth import MsOAuthError
+from postcard.core.net.proton_session import ProtonError
 from postcard.core.net.smtp_session import SmtpError
+from postcard.core.net.tuta_session import TutaError
 
 # Only the "is this the password?" half is asserted — the messages go through
 # gettext, so their text depends on the active translation. Everything that is
@@ -77,3 +80,22 @@ def test_other_graph_errors_show_graph_s_message():
         False,
         "bad id",
     )
+
+
+# --- Native providers -------------------------------------------------------
+
+
+def test_an_expired_microsoft_grant_is_a_sign_in_problem():
+    assert is_auth_failure(MsOAuthError("invalid_grant"))
+    assert not is_auth_failure(MsOAuthError("server_error"))
+    assert not is_auth_failure(MsOAuthError("invalid_response"))
+
+
+def test_a_missing_second_factor_is_a_sign_in_problem():
+    assert is_auth_failure(TutaError("second_factor_required"))
+    assert not is_auth_failure(TutaError("helper_missing"))
+    assert not is_auth_failure(TutaError("unsupported_operation"))
+
+
+def test_an_unimplemented_proton_operation_is_not():
+    assert not is_auth_failure(ProtonError("unsupported_operation"))

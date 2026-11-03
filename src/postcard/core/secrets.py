@@ -1,6 +1,8 @@
 """Where an account's sign-in comes from: the system keyring for an account
 typed in by hand, GNOME Online Accounts for one imported from Settings."""
 
+import logging
+
 import gi
 
 gi.require_version("Secret", "1")
@@ -9,8 +11,12 @@ from gi.repository import Secret
 
 from . import goa
 from .models.account import Account
+from .net import ms_oauth
 from .net.auth import Credential
+from .net.proton_session import MECHANISM_PROTON
 from .net.tuta_session import MECHANISM_TUTA
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = Secret.Schema.new(
     "in.gxanshu.postcard.Account",
@@ -47,8 +53,24 @@ def credential_for(account: Account) -> Credential | None:
     if account.goa_id:
         return goa.credential(account.goa_id)
 
-    password = lookup_password(account.id)
-    if not password:
+    stored = lookup_password(account.id)
+    if not stored:
         return None
-    mechanism = MECHANISM_TUTA if account.is_tuta else "login"
-    return Credential(account.login_name, password, mechanism)
+    if account.is_graph:
+        # A Microsoft account added natively holds a refresh token, not a
+        # password. Never raise: workers call this outside their try block, so
+        # a failure here must read as "could not sign in", like every other.
+        try:
+            return ms_oauth.native_credential(account.email, stored)
+        except ms_oauth.MsOAuthError:
+            logger.warning(
+                "could not refresh the Microsoft sign-in for %s", account.email
+            )
+            return None
+    if account.is_tuta:
+        mechanism = MECHANISM_TUTA
+    elif account.is_proton:
+        mechanism = MECHANISM_PROTON
+    else:
+        mechanism = "login"
+    return Credential(account.login_name, stored, mechanism)

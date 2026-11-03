@@ -100,3 +100,118 @@ def test_move_reports_successful_prefix_without_guessing_new_ids():
     assert result.destination_uids == [None]
     assert result.failed_index == 1
     assert isinstance(result.error, TutaError)
+
+
+def test_an_empty_flag_change_sends_no_request():
+    class Session:
+        def request(self, *args, **kwargs):
+            pytest.fail("an empty flag change reached the helper")
+
+    tuta_messages.set_flags(Session(), [], FLAG_SEEN, True)
+
+
+def test_folder_rows_keep_their_server_stated_identity():
+    (mailbox,) = tuta_messages.mailbox_infos(
+        [{"id": "lists/inbox", "label": "Posteingang", "role": "inbox", "parent": ""}]
+    )
+    assert mailbox.name == "lists/inbox"
+    assert mailbox.label == "Posteingang"
+    assert mailbox.role == "inbox"
+    assert mailbox.parent == ""
+
+
+def test_an_unknown_folder_role_does_not_fail_the_sync():
+    (mailbox,) = tuta_messages.mailbox_infos(
+        [{"id": "lists/x", "label": "X", "role": "someday", "parent": ""}]
+    )
+    assert mailbox.role == "other"
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        {"id": "lists/inbox"},
+        ["lists/inbox"],
+        [{"label": "Inbox", "role": "inbox", "parent": ""}],
+        [{"id": "", "label": "Inbox", "role": "inbox", "parent": ""}],
+        [{"id": 42, "label": "Inbox", "role": "inbox", "parent": ""}],
+    ],
+)
+def test_a_folder_row_without_an_id_is_not_a_folder(rows):
+    with pytest.raises(TutaError) as caught:
+        tuta_messages.mailbox_infos(rows)
+    assert caught.value.code == "invalid_response"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "lists/message",
+        {**HEADER, "id": ""},
+        {**HEADER, "id": 42},
+        {**HEADER, "date_ms": "yesterday"},
+        {**HEADER, "date_ms": True},
+        {**HEADER, "date_ms": 10**20},
+    ],
+)
+def test_a_header_without_identity_or_date_is_rejected(item):
+    with pytest.raises(TutaError) as caught:
+        tuta_messages.message_header(item)
+    assert caught.value.code == "invalid_response"
+
+
+def test_a_missing_unread_flag_fails_visible():
+    assert tuta_messages.message_header({**HEADER, "is_unread": True}).is_unread is True
+    header = dict(HEADER)
+    del header["is_unread"]
+    assert tuta_messages.message_header(header).is_unread is True
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "body",
+        {"html": "body"},
+        {"header": "lists/message", "html": "body"},
+        {"header": HEADER, "html": 42},
+        {"header": {**HEADER, "date_ms": "yesterday"}, "html": "body"},
+        {"header": HEADER, "html": "body", "to": "ada@tuta.com"},
+        {"header": HEADER, "html": "body", "attachments": "file.bin"},
+    ],
+)
+def test_a_body_without_shape_is_rejected(item):
+    with pytest.raises(TutaError) as caught:
+        tuta_messages.mime_message(item)
+    assert caught.value.code == "invalid_response"
+
+
+@pytest.mark.parametrize(
+    "attachment",
+    [
+        "file.bin",
+        {"name": "file.bin"},
+        {"name": "file.bin", "data": "!!! not base64 !!!"},
+        {"name": "file.bin", "data": 42},
+    ],
+)
+def test_a_broken_attachment_fails_as_one_not_as_a_body(attachment):
+    with pytest.raises(TutaError) as caught:
+        tuta_messages.mime_message(
+            {"header": HEADER, "html": "body", "attachments": [attachment]}
+        )
+    assert caught.value.code == "attachment_failed"
+
+
+def test_a_mistyped_attachment_label_falls_back_to_a_default():
+    raw = tuta_messages.mime_message(
+        {
+            "header": HEADER,
+            "html": "body",
+            "attachments": [{"name": 42, "mime_type": 42, "data": "aGk="}],
+        }
+    )
+    attachment = next(
+        BytesParser(policy=policy.default).parsebytes(raw).iter_attachments()
+    )
+    assert attachment.get_filename() == "attachment"
+    assert attachment.get_content_type() == "application/octet-stream"

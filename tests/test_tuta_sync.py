@@ -3,7 +3,12 @@ import json
 import pytest
 
 import postcard.mail_sync as mail_sync
-from postcard.core.models.account import PROTOCOL_TUTA, Account
+from postcard.core.models.account import (
+    PROTOCOL_TUTA,
+    TUTA_HOST,
+    TUTA_PORT,
+    Account,
+)
 from postcard.core.net.auth import Credential
 from postcard.core.net.imap_session import FLAG_SEEN
 from postcard.core.net.tuta_session import MECHANISM_TUTA, TutaError
@@ -17,10 +22,10 @@ def tuta(monkeypatch):
         email="ada@tuta.com",
         display_name="Ada",
         protocol=PROTOCOL_TUTA,
-        imap_host="app.tuta.com",
-        imap_port=443,
-        smtp_host="app.tuta.com",
-        smtp_port=443,
+        imap_host=TUTA_HOST,
+        imap_port=TUTA_PORT,
+        smtp_host=TUTA_HOST,
+        smtp_port=TUTA_PORT,
     )
     credential = Credential(
         account.email, json.dumps({"login": account.email}), MECHANISM_TUTA
@@ -125,13 +130,79 @@ def test_database_round_trips_native_protocol():
     saved = db.save_account(
         "ada@tuta.com",
         "Ada",
-        "app.tuta.com",
-        443,
-        "app.tuta.com",
-        443,
+        TUTA_HOST,
+        TUTA_PORT,
+        TUTA_HOST,
+        TUTA_PORT,
         protocol=PROTOCOL_TUTA,
     )
     assert saved.is_tuta
     assert db.accounts()[0].is_tuta
     assert not saved.is_graph
     db.close()
+
+
+def test_a_foreign_folder_role_does_not_fail_the_sync(tuta, monkeypatch):
+    account, credential, _ = tuta
+
+    class Session:
+        def __init__(self, credential):
+            pass
+
+        def request(self, operation, **kwargs):
+            return {
+                "folders": [
+                    {
+                        "id": "lists/x",
+                        "label": "X",
+                        "role": "someday",
+                        "parent": "",
+                    }
+                ],
+                "messages": [],
+                "folder": "lists/x",
+                "exists": 0,
+                "all_ids": [],
+                "offset": 0,
+            }
+
+    monkeypatch.setattr(mail_sync, "TutaSession", Session)
+    result = mail_sync.fetch_mailbox(account, credential)
+    assert result.folders[0].role == "other"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"folders": {}},
+        {"messages": {"id": "lists/mail"}},
+        {"messages": [{"subject": "no id", "date_ms": 0}]},
+        {"folder": 42},
+        {"exists": "many"},
+        {"offset": "zero"},
+        {"all_ids": "lists/mail"},
+        {"all_ids": ["lists/mail", 42]},
+    ],
+)
+def test_a_misshapen_sync_reply_fails_as_one(tuta, monkeypatch, broken):
+    account, credential, _ = tuta
+
+    class Session:
+        def __init__(self, credential):
+            pass
+
+        def request(self, operation, **kwargs):
+            reply = {
+                "folders": [],
+                "messages": [],
+                "folder": "folders/inbox",
+                "exists": 0,
+                "all_ids": [],
+                "offset": 0,
+            }
+            return reply | broken
+
+    monkeypatch.setattr(mail_sync, "TutaSession", Session)
+    with pytest.raises(TutaError) as caught:
+        mail_sync.fetch_mailbox(account, credential)
+    assert caught.value.code == "invalid_response"

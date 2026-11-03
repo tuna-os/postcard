@@ -6,6 +6,8 @@ from gettext import gettext as _
 
 from .graph_session import GraphError
 from .imap_session import ImapError, UidValidityError
+from .ms_oauth import MsOAuthError
+from .proton_session import ProtonError
 from .smtp_session import SmtpError
 from .tuta_session import TutaError
 
@@ -43,6 +45,10 @@ def classify(exc: Exception, host: str) -> tuple[bool, str]:  # noqa: PLR0911, C
         return False, _("Connecting to {host} timed out.").format(host=host)
     if isinstance(exc, TutaError):
         return _classify_tuta(exc)
+    if isinstance(exc, ProtonError):
+        return False, _("Proton Mail is not supported in this build yet.")
+    if isinstance(exc, MsOAuthError):
+        return _classify_ms_oauth(exc)
     if isinstance(exc, GraphError):
         return _classify_graph(exc)
     if isinstance(exc, UidValidityError):
@@ -92,6 +98,14 @@ _URL_PATTERN = re.compile(r"https?://[^\s<>]*[^\s<>.,;:)\]]")
 def linkify(text: str) -> str:
     escaped = html.escape(text)
     return _URL_PATTERN.sub(lambda m: f'<a href="{m.group()}">{m.group()}</a>', escaped)
+
+
+def _classify_ms_oauth(exc: MsOAuthError) -> tuple[bool, str]:
+    if exc.code == "invalid_grant":
+        return True, _(
+            "The Microsoft sign-in expired. Reconnect the account to continue."
+        )
+    return False, _("The Microsoft sign-in could not be completed. Try again later.")
 
 
 def _classify_tuta(exc: TutaError) -> tuple[bool, str]:

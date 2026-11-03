@@ -78,15 +78,24 @@ SMTP or silently disable encryption. Move results do not guess a destination
 message ID: Tuta can move a mail to a different underlying list.
 
 `login()` in `core/net/tuta_session.py` returns a `Credential` containing session
-material for libsecret. Its repr hides the secret. The GTK setup/revocation
-flow has not been implemented; this API is not a user login interface.
+material for libsecret. Its repr hides the secret. The GTK setup flow has not
+been implemented; this API is not a user login interface.
 Do not print the result or store it in a source/fixture file.
+
+Replies are validated where they are consumed: a misshapen sync, header or
+body raises `invalid_response` (or `attachment_failed`) rather than leaking
+an internal error into the UI. Folder types the helper does not know map to
+`other` on both sides, so a newer server-side folder kind stays browsable.
+The ID snapshot is type-checked before anything prunes from it: pruning from
+a corrupt snapshot would wipe the folder's cache.
 
 ## Limits before enabling accounts
 
-- Sessions are resumed once per operation; pooling, revocation and interactive
-  challenge cancellation are unfinished. A retry can leave a pending login
-  session visible in the official client's session list.
+- Sessions are resumed once per operation; pooling and interactive challenge
+  cancellation are unfinished. A retry can leave a pending login session
+  visible in the official client's session list. Revocation is local-only:
+  the pinned SDK exposes no logout API, so removing the account clears the
+  keyring entry and the server-side session is left to expire.
 - Only TOTP is prototyped; WebAuthn/U2F is unsupported.
 - Full entry lists are loaded per sync; large-mailbox performance is untested.
   A failed listing is never returned as an authoritative empty snapshot.

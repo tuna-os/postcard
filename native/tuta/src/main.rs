@@ -380,6 +380,11 @@ mod tests {
         }
     }
     #[test]
+    fn unknown_folder_types_stay_browsable() {
+        assert_eq!(role(1), ("inbox", "Inbox"));
+        assert_eq!(role(99), ("other", "Folder"));
+    }
+    #[test]
     fn request_rejects_unrecognized_operations() {
         assert!(serde_json::from_str::<Request>(r#"{"version":1,"op":"send"}"#).is_err());
     }
