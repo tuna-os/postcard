@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     io::{self, Read},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -27,6 +28,39 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const TUTA_URL: &str = "https://app.tuta.com";
 
 type Result<T> = std::result::Result<T, &'static str>;
+
+// The pinned SDK prints progress to stdout (see `fetch_server_model`), which
+// would corrupt the single-line reply the transport parses. Park fd 1 on
+// /dev/null while SDK code runs; dropping the guard restores it.
+struct QuietStdout {
+    saved: OwnedFd,
+}
+
+fn quiet_stdout() -> io::Result<QuietStdout> {
+    // SAFETY: dup hands back an owned fd on success; -1 is checked.
+    let saved = unsafe {
+        let fd = libc::dup(libc::STDOUT_FILENO);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedFd::from_raw_fd(fd)
+    };
+    let null = std::fs::File::open("/dev/null")?;
+    // SAFETY: both fds are valid; stdout now points at /dev/null.
+    if unsafe { libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(QuietStdout { saved })
+}
+
+impl Drop for QuietStdout {
+    fn drop(&mut self) {
+        // SAFETY: the saved fd stays valid for the guard's lifetime.
+        unsafe {
+            libc::dup2(self.saved.as_raw_fd(), libc::STDOUT_FILENO);
+        }
+    }
+}
 
 // Deliberately not Debug: this structure contains session and wrapping keys.
 #[derive(Deserialize, Serialize)]
@@ -347,6 +381,9 @@ async fn dispatch(request: Request) -> Result<Value> {
 }
 #[tokio::main]
 async fn main() {
+    // If stdout cannot be parked the request still runs; a chatty SDK only
+    // risks the reply, it must not fail the operation itself.
+    let quiet = quiet_stdout().ok();
     let mut input = Vec::new();
     let result = match io::stdin()
         .take(MAX_REQUEST_BYTES + 1)
@@ -366,6 +403,7 @@ async fn main() {
         Ok(result) => json!({"version": VERSION, "result": result}),
         Err(code) => json!({"version": VERSION, "error": {"code": code}}),
     };
+    drop(quiet);
     println!("{response}");
 }
 
@@ -387,6 +425,21 @@ mod tests {
     #[test]
     fn request_rejects_unrecognized_operations() {
         assert!(serde_json::from_str::<Request>(r#"{"version":1,"op":"send"}"#).is_err());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stdout_is_parked_on_dev_null_while_held() {
+        use std::os::unix::fs::MetadataExt;
+        let target = |path: &str| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        let (null, before) = (target("/dev/null"), target("/proc/self/fd/1"));
+        {
+            let _quiet = quiet_stdout().unwrap();
+            assert_eq!(target("/proc/self/fd/1"), null);
+        }
+        assert_eq!(target("/proc/self/fd/1"), before);
     }
     #[tokio::test]
     async fn incompatible_version_never_connects() {
