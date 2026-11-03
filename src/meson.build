@@ -91,7 +91,13 @@ postcard_core_net_sources = [
   'postcard/core/net/graph_send.py',
   'postcard/core/net/graph_session.py',
   'postcard/core/net/imap_session.py',
+  'postcard/core/net/ms_login.py',
+  'postcard/core/net/ms_loopback.py',
+  'postcard/core/net/ms_oauth.py',
+  'postcard/core/net/proton_session.py',
   'postcard/core/net/smtp_session.py',
+  'postcard/core/net/tuta_session.py',
+  'postcard/core/net/tuta_messages.py',
 ]
 python_installation.install_sources(postcard_core_net_sources, subdir: 'postcard/core/net')
 

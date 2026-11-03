@@ -1,0 +1,19 @@
+[package]
+name = "postcard-tuta"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace]
+exclude = ["upstream", "upstream/sdk/generated"]
+
+[dependencies]
+tuta-sdk = { path = "upstream/sdk/generated/tuta-sdk/rust/sdk", features = ["net"] }
+tutabridge-tuta = { path = "upstream/crates/tuta" }
+async-trait = "0.1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

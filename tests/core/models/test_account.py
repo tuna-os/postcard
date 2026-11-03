@@ -1,5 +1,9 @@
 from postcard.core.models.account import (
     MAX_PORT,
+    PROTOCOL_GRAPH,
+    PROTOCOL_IMAP,
+    PROTOCOL_PROTON,
+    PROTOCOL_TUTA,
     SECURITY_OPTIONS,
     SECURITY_STARTTLS,
     SECURITY_TLS,
@@ -83,3 +87,18 @@ def test_a_username_overrides_the_email_address_for_sign_in() -> None:
     signed_in = account(email="ada.lovelace@example.com", username="lovelace.a")
     assert signed_in.login_name == "lovelace.a"
     assert signed_in.email == "ada.lovelace@example.com"
+
+
+def test_each_protocol_reports_itself() -> None:
+    assert account(protocol=PROTOCOL_IMAP).is_graph is False
+    assert account(protocol=PROTOCOL_GRAPH).is_graph is True
+    assert account(protocol=PROTOCOL_TUTA).is_tuta is True
+    assert account(protocol=PROTOCOL_PROTON).is_proton is True
+    assert account(protocol=PROTOCOL_IMAP).is_proton is False
+
+
+def test_only_imap_can_hold_an_idle_connection() -> None:
+    assert account(protocol=PROTOCOL_IMAP).is_pushless is False
+    assert account(protocol=PROTOCOL_GRAPH).is_pushless is True
+    assert account(protocol=PROTOCOL_TUTA).is_pushless is True
+    assert account(protocol=PROTOCOL_PROTON).is_pushless is True

@@ -20,7 +20,13 @@ from .core.models.folder import Folder, FolderRole
 # Re-exported: callers reach MessageHeader through mail_sync, which is where it
 # is built. It lives in core.models so core.store can accept one directly.
 from .core.models.message_header import MessageHeader
-from .core.net import MoveResult, graph_folders, graph_messages, graph_send
+from .core.net import (
+    MoveResult,
+    graph_folders,
+    graph_messages,
+    graph_send,
+    tuta_messages,
+)
 from .core.net.auth import Credential
 from .core.net.graph_session import GraphSession
 from .core.net.imap_session import (
@@ -34,7 +40,9 @@ from .core.net.imap_session import (
     UidValidityError,
     decode_mailbox_name,
 )
+from .core.net.proton_session import ProtonError
 from .core.net.smtp_session import SmtpSession
+from .core.net.tuta_session import TutaError, TutaSession
 from .core.store.database import Database
 from .core.threader import NO_SUBJECT
 
@@ -155,9 +163,10 @@ class _InboxWatcher:
 
     An IMAP account gets a connection of its own held in IDLE on the inbox:
     IDLE blocks the connection it runs on, so it can't be the pooled one. A
-    Graph account, or a server without IDLE, offers no push a desktop client
-    can receive, so it is polled instead. on_change also fires every time a
-    connection starts watching, for whatever arrived while none was.
+    pushless account (Graph, Tuta, Proton), or a server without IDLE, offers
+    no push a desktop client can receive, so it is polled instead. on_change
+    also fires every time a connection starts watching, for whatever arrived
+    while none was.
 
     The account is a snapshot and the thread touches neither the database nor
     GTK; credential_for is called on the thread, like every worker's.
@@ -191,7 +200,7 @@ class _InboxWatcher:
             self._on_change(self._account.id)
 
     def _run(self) -> None:
-        if not self._account.is_graph:
+        if not self._account.is_pushless:
             self._watch_idle()
         while not self._stop.wait(PUSHLESS_POLL_SECONDS):
             self._changed()
@@ -406,6 +415,10 @@ def fetch_mailbox(
     `should_count_unread` refreshes the badges of the folders this sync isn't
     fetching, which costs a STATUS round trip each -- see _unread_counts.
     """
+    if account.is_tuta:
+        return _fetch_tuta_mailbox(credential, folder, limit, offset)
+    if account.is_proton:
+        raise ProtonError("unsupported_operation")
     if account.is_graph:
         return _fetch_graph_mailbox(
             account, credential, folder, limit, offset, should_count_unread
@@ -477,6 +490,49 @@ def _unread_counts(
                 "could not read the unread count of %s", mailbox.name, exc_info=True
             )
     return counts
+
+
+def _fetch_tuta_mailbox(
+    credential: Credential,
+    folder: str | None,
+    limit: int,
+    offset: int,
+) -> SyncResult:
+    result = TutaSession(credential).request(
+        "sync", folder=folder, limit=limit, offset=offset
+    )
+    try:
+        folders = tuta_messages.mailbox_infos(result["folders"])
+        messages = [tuta_messages.message_header(row) for row in result["messages"]]
+        folder_id = result["folder"]
+        exists = result["exists"]
+        reply_offset = result["offset"]
+        all_ids = result["all_ids"]
+    except (KeyError, TypeError):
+        raise TutaError("invalid_response") from None
+    if (
+        not isinstance(folder_id, str)
+        or isinstance(exists, bool)
+        or not isinstance(exists, int)
+        or isinstance(reply_offset, bool)
+        or not isinstance(reply_offset, int)
+    ):
+        raise TutaError("invalid_response")
+    # The id snapshot drives prune_stale_emails: a non-string member would
+    # match nothing and wipe the folder's cache, so reject it instead.
+    if all_ids is not None and (
+        not isinstance(all_ids, list)
+        or any(not isinstance(uid, str) for uid in all_ids)
+    ):
+        raise TutaError("invalid_response")
+    return SyncResult(
+        folders=folders,
+        messages=messages,
+        folder=folder_id,
+        exists=exists,
+        offset=reply_offset,
+        all_uids=set(all_ids) if all_ids is not None else None,
+    )
 
 
 def _fetch_graph_mailbox(
@@ -567,6 +623,10 @@ def fetch_full_message(
     uidvalidity: int | None,
 ) -> bytes:
     """Open one folder and download a single full message."""
+    if account.is_tuta:
+        return tuta_messages.fetch_mime(TutaSession(credential), uid)
+    if account.is_proton:
+        raise ProtonError("unsupported_operation")
     if account.is_graph:
         return graph_messages.fetch_mime(GraphSession(credential), uid)
     with _pooled_session(account, credential) as session:
@@ -604,6 +664,11 @@ def set_flag(
     """
     if not uids:
         return
+    if account.is_tuta:
+        tuta_messages.set_flags(TutaSession(credential), list(uids), flag, should_add)
+        return
+    if account.is_proton:
+        raise ProtonError("unsupported_operation")
     if account.is_graph:
         graph_messages.set_flags(GraphSession(credential), list(uids), flag, should_add)
         return
@@ -622,6 +687,10 @@ def move_messages(
     uidvalidity: int | None,
 ) -> MoveResult:
     """Move every message in a conversation to another mailbox."""
+    if account.is_tuta:
+        return tuta_messages.move(TutaSession(credential), uids, destination)
+    if account.is_proton:
+        raise ProtonError("unsupported_operation")
     if account.is_graph:
         return graph_messages.move(GraphSession(credential), uids, destination)
     with _pooled_session(account, credential) as session:
@@ -649,6 +718,11 @@ def send_message(
     raw: bytes,
 ) -> None:
     """Connect, log in, and hand a fully-built message to the server."""
+    if account.is_tuta:
+        # Sending stays unavailable until native recipient encryption is ready.
+        raise TutaError("unsupported_operation")
+    if account.is_proton:
+        raise ProtonError("unsupported_operation")
     if account.is_graph:
         # Exchange files the Sent copy itself, so there is nothing to append.
         graph_send.send_mime(GraphSession(credential), raw, recipients)

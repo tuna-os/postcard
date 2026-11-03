@@ -1,0 +1,36 @@
+name: Tuta native prototype
+
+on:
+  pull_request:
+    paths:
+      - 'native/tuta/**'
+      - 'src/postcard/core/net/tuta*.py'
+      - 'tests/core/net/test_tuta*.py'
+      - '.gitmodules'
+      - '.github/workflows/tuta-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Prepare and verify the pinned SDK
+        run: python3 native/tuta/upstream/scripts/sdk-prepare.py
+      - name: Install the tested Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt
+      - name: Check Rust formatting
+        run: cargo +1.99.1 fmt --manifest-path native/tuta/Cargo.toml --check
+      - name: Build and test the native adapter
+        run: |
+          cargo +1.99.1 test --locked --manifest-path native/tuta/Cargo.toml
+          cargo +1.99.1 build --locked --manifest-path native/tuta/Cargo.toml
+      - name: Test the Python and compiled-helper contract without an account
+        run: |
+          python3 -m pip install pytest
+          POSTCARD_TUTA_TEST_BINARY="$PWD/native/tuta/target/debug/postcard-tuta" python3 -m pytest tests/core/net/test_tuta_session.py

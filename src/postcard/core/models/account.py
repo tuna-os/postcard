@@ -11,14 +11,21 @@ MIN_PORT = 1
 MAX_PORT = 65535
 
 # How an account's mail is reached. IMAP/SMTP is everything typed in by hand
-# and Google; Microsoft 365 hands out a token that only opens the Graph API.
+# and Google; Microsoft 365 hands out a token that only opens the Graph API;
+# Tuta and Proton speak their own HTTPS APIs through a native helper.
 PROTOCOL_IMAP = "imap"
 PROTOCOL_GRAPH = "graph"
+PROTOCOL_TUTA = "tuta"
+PROTOCOL_PROTON = "proton"
 
 # What a Graph account stores in the host/port columns, which predate it and are
 # NOT NULL. Error messages name the host, so it is the real one.
 GRAPH_HOST = "graph.microsoft.com"
 GRAPH_PORT = 443
+
+# Same for Tuta: the API endpoint the helper talks to, for error messages.
+TUTA_HOST = "app.tuta.com"
+TUTA_PORT = 443
 
 
 def parse_port(text: str) -> int | None:
@@ -72,8 +79,26 @@ class Account(GObject.Object):
         self.protocol: str = protocol
 
     @property
+    def is_tuta(self) -> bool:
+        return self.protocol == PROTOCOL_TUTA
+
+    @property
+    def is_proton(self) -> bool:
+        return self.protocol == PROTOCOL_PROTON
+
+    @property
     def is_graph(self) -> bool:
         return self.protocol == PROTOCOL_GRAPH
+
+    @property
+    def is_pushless(self) -> bool:
+        """Whether this account's inbox can only be polled, never watched.
+
+        IMAP IDLE holds a connection open on the inbox; Graph, Tuta and Proton
+        offer no push channel a desktop client can hold, so the watcher polls
+        instead. One predicate so the next protocol cannot be forgotten there.
+        """
+        return self.protocol in (PROTOCOL_GRAPH, PROTOCOL_TUTA, PROTOCOL_PROTON)
 
     @property
     def short_label(self) -> str:
