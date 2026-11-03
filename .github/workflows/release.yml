@@ -57,6 +57,11 @@ jobs:
       GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY_ID }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare and verify the pinned SDK
+        run: python3 native/tuta/upstream/scripts/sdk-prepare.py
 
       - name: Set up the build environment
         run: |

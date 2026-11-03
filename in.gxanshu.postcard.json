@@ -3,6 +3,9 @@
   "runtime": "org.gnome.Platform",
   "runtime-version": "51",
   "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
   "command": "postcard",
   "finish-args": [
     "--share=network",
@@ -58,6 +61,33 @@
       ]
     },
     {
+      "name": "postcard-tuta",
+      "buildsystem": "simple",
+      "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "env": {
+          "CARGO_HOME": "/run/build/postcard-tuta/cargo",
+          "CARGO_NET_OFFLINE": "true"
+        }
+      },
+      "build-commands": [
+        "cargo build --offline --locked --release",
+        "install -Dm755 target/release/postcard-tuta /app/bin/postcard-tuta"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "native/tuta",
+          "skip": [
+            "target",
+            "upstream/target",
+            "upstream/tuta-repo"
+          ]
+        },
+        "native/tuta/cargo-sources.json"
+      ]
+    },
+    {
       "name": "postcard",
       "builddir": true,
       "buildsystem": "meson",
@@ -70,7 +100,9 @@
             ".flatpak",
             ".flatpak-builder",
             ".git",
-            "postcard-*.flatpak"
+            "postcard-*.flatpak",
+            "native/tuta/target",
+            "native/tuta/upstream/tuta-repo"
           ]
         }
       ],
