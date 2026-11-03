@@ -57,10 +57,15 @@ must be verified rather than inferred from library availability.
 
 The `proton` protocol id is already reserved: Proton account rows fail closed
 with a friendly "not supported yet" instead of falling through to IMAP, and
-their inbox watcher polls. `proton_session.py` pins the helper IPC contract
-the future binary must speak (same stdio shape as Tuta: versioned JSON,
-stdin-only secrets, fixed error vocabulary), with the adapter tested against
-fixtures. What remains is the helper itself plus reply mapping and routing.
+their inbox watcher polls. `proton_session.py` pins the helper IPC contract,
+and `native/proton/` holds a stdlib-only Go stub that already speaks it
+(versioned JSON over stdio, stdin-only secrets, fixed error vocabulary), with
+both sides tested against a compiled binary in `proton-native.yml`. The
+research pass is done: `go-proton-api` v0.4.0 covers SRP login, sync, drafts,
+sending, flags, events and revocation, and unlike Tuta its send path is a
+library call — see `native/proton/README.md`. What remains is growing the
+stub into the real helper behind live-account testing, plus reply mapping and
+routing.
 
 ## Native Microsoft 365 — sign in without Online Accounts
 
