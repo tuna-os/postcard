@@ -1,0 +1,311 @@
+name: Hive health
+
+# Scheduled maintenance checks for issue #22: dependency pins, workflow
+# drift, release/install smoke, stale failures, and performance baselines.
+#
+# Rules (see docs/hive/contracts.md):
+# - Read-only plus issues. Steps inspect the tree, run the documented
+#   headless entrypoints, and query run history. The only writes are
+#   creating/commenting on/closing this workflow's own tracking issues.
+# - Deduplicated. One tracking issue per check, titled "[hive-health]
+#   <check>". An open issue with that title gets a comment, not a sibling.
+# - Never silently changing policy. Findings become triage-needed issues
+#   for a maintainer; nothing here edits a workflow, bumps a pin, or merges.
+# - No credentials, no destructive data. Live tests stay deselected; no step
+#   touches a mailbox, a keyring, or the release branches.
+
+on:
+  schedule:
+    # Mondays 07:00 UTC — weekly is enough for drift; failures page via the
+    # tracking issues, not via run noise.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check dependency pins
+        run: |
+          set -u
+          mkdir -p health
+          out=health/pins.md
+          : > "$out"
+          note() { printf '%s\n' "- $1" >> "$out"; }
+
+          # sqlcipher3 must match in requirements.txt, tests.yml, and the
+          # manifest's bundled tarball (see requirements.txt header).
+          req=$(grep -m1 -oE 'sqlcipher3==[0-9.]+' requirements.txt | cut -d= -f3)
+          ci=$(grep -m1 -oE 'sqlcipher3==[0-9.]+' .github/workflows/tests.yml | cut -d= -f3)
+          manifest=$(grep -m1 -oE 'sqlcipher3-[0-9.]+\.tar\.gz' in.gxanshu.postcard.json \
+            | sed -E 's/sqlcipher3-([0-9.]+)\.tar\.gz/\1/')
+          [ -n "$req" ] || note "could not find the sqlcipher3 pin in requirements.txt"
+          [ -n "$ci" ] || note "could not find the sqlcipher3 pin in tests.yml"
+          [ -n "$manifest" ] || note "could not find the sqlcipher3 source in in.gxanshu.postcard.json"
+          [ "$req" = "$ci" ] || note "sqlcipher3 drift: requirements.txt has $req, tests.yml has $ci"
+          [ "$req" = "$manifest" ] || note "sqlcipher3 drift: requirements.txt has $req, manifest bundles $manifest"
+
+          # PyGObject-stubs must match in the justfile and tests.yml (see the
+          # justfile recipe and the tests.yml comment: bump both together).
+          jst=$(grep -m1 -oE 'PyGObject-stubs==[0-9.]+' justfile | cut -d= -f3)
+          ci=$(grep -m1 -oE 'PyGObject-stubs==[0-9.]+' .github/workflows/tests.yml | cut -d= -f3)
+          [ -n "$jst" ] && [ -n "$ci" ] || note "could not find the PyGObject-stubs pin in the justfile and tests.yml"
+          [ "$jst" = "$ci" ] || note "PyGObject-stubs drift: justfile has $jst, tests.yml has $ci"
+
+          # Go toolchain: proton-native.yml must match native/proton/go.mod.
+          ci=$(grep -m1 -oE "go-version: '[0-9.]+" .github/workflows/proton-native.yml | grep -oE '[0-9.]+$')
+          mod=$(grep -m1 -oE '^go [0-9.]+' native/proton/go.mod | cut -d' ' -f2)
+          [ -n "$ci" ] && [ -n "$mod" ] || note "could not find the Go pin in proton-native.yml and native/proton/go.mod"
+          [ "$ci" = "$mod" ] || note "Go drift: proton-native.yml has $ci, native/proton/go.mod has $mod"
+
+          # Rust toolchain: one version across the tuta-native.yml steps, and
+          # the lockfile its --locked builds need.
+          count=$(grep -oE 'cargo \+[0-9.]+|rustup toolchain install [0-9.]+' .github/workflows/tuta-native.yml \
+            | grep -oE '[0-9.]+' | sort -u | wc -l)
+          [ "$count" -eq 1 ] || note "tuta-native.yml uses $count distinct Rust toolchains, expected 1"
+          [ -f native/tuta/Cargo.lock ] || note "native/tuta/Cargo.lock is missing (--locked builds would fail)"
+
+          # GNOME runtime: release.yml's container images track the manifest.
+          rt=$(python3 -c "import json; print(json.load(open('in.gxanshu.postcard.json'))['runtime-version'])")
+          while read -r img; do
+            [ -z "$img" ] || echo "$img" | grep -q "gnome-$rt" \
+              || note "release.yml image $img does not match manifest runtime-version $rt"
+          done < <(grep -oE 'flatpak-github-actions:gnome-[0-9]+' .github/workflows/release.yml | sort -u)
+          grep -q "org.gnome.Platform//$rt" .github/workflows/release.yml \
+            || note "release.yml no longer references org.gnome.Platform//$rt"
+
+          # Every third-party action reference stays major-pinned, like the
+          # existing files. Local reusable workflows (./...) are versioned
+          # with the tree, and grep-pattern lines are not references.
+          unpinned=$(grep -rh 'uses:' .github/workflows/ | grep -vE '^\s*#' \
+            | grep -v 'grep ' | grep -oE 'uses: [^[:space:]]+' \
+            | grep -vE '@v[0-9]+$' | grep -vE '^uses: \./' || true)
+          [ -z "$unpinned" ] || note "unpinned actions: $(echo "$unpinned" | tr '\n' ' ')"
+
+          if [ -s "$out" ]; then cat "$out" >> "$GITHUB_STEP_SUMMARY"; else echo "pins: healthy" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Check workflow drift
+        run: |
+          set -u
+          mkdir -p health
+          out=health/drift.md
+          : > "$out"
+          note() { printf '%s\n' "- $1" >> "$out"; }
+
+          # Recipes docs/hive/headless.md promises must still exist.
+          for r in init build run run-debug inspect bundle lint site fmt check test test-gui pot clean; do
+            grep -qE "^$r([ *].*)?:" justfile \
+              || note "justfile lost recipe '$r' documented in docs/hive/headless.md"
+          done
+
+          # tests.yml must still run what headless.md quotes.
+          grep -q 'ruff check src tests' .github/workflows/tests.yml \
+            || note "tests.yml no longer runs 'ruff check src tests'"
+          grep -q 'ruff format --check src tests' .github/workflows/tests.yml \
+            || note "tests.yml no longer runs 'ruff format --check src tests'"
+          grep -q 'pyright src/postcard' .github/workflows/tests.yml \
+            || note "tests.yml no longer runs 'pyright src/postcard'"
+          grep -q 'python3 -m pytest' .github/workflows/tests.yml \
+            || note "tests.yml no longer runs 'python3 -m pytest'"
+
+          # The GTK lane must still mirror `just test-gui`.
+          grep -q 'tests/gui/' .github/workflows/gui-tests.yml \
+            || note "gui-tests.yml no longer targets tests/gui/"
+          grep -q 'xvfb-run' .github/workflows/gui-tests.yml \
+            || note "gui-tests.yml no longer runs under xvfb-run"
+          grep -q 'xvfb-run' justfile \
+            || note "justfile lost the xvfb-run in test-gui"
+
+          # Files the Hive docs point at must exist.
+          for f in docs/hive/contracts.md docs/hive/headless.md tests/live/README.md \
+              web/build.sh native/proton/go.mod .github/ISSUE_TEMPLATE/implementation_task.yml; do
+            [ -f "$f" ] || note "Hive docs reference $f, which no longer exists"
+          done
+
+          # Every issue template and workflow must still parse as YAML.
+          python3 -m pip install -q pyyaml
+          for f in .github/ISSUE_TEMPLATE/*.yml .github/workflows/*.yml; do
+            T="$f" python3 -c "import os, yaml; yaml.safe_load(open(os.environ['T']))" \
+              || note "$f no longer parses as YAML"
+          done
+
+          if [ -s "$out" ]; then cat "$out" >> "$GITHUB_STEP_SUMMARY"; else echo "drift: healthy" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Check release and install smoke
+        run: |
+          set -u
+          mkdir -p health
+          out=health/release-smoke.md
+          : > "$out"
+          note() { printf '%s\n' "- $1" >> "$out"; }
+
+          # Assemble the site exactly as the publishers do; static only.
+          sh web/build.sh /tmp/site-smoke
+          grep -rq '__VERSION__' /tmp/site-smoke \
+            && note "built site still contains __VERSION__ (stamp step broke)"
+          grep -q 'releases/latest/download/postcard.flatpakref' /tmp/site-smoke/index.html \
+            || note "built index.html lost the download-counter install URL"
+          [ ! -f /tmp/site-smoke/postcard.flatpakref ] \
+            || note "site build now mirrors postcard.flatpakref (leaks downloads past the counter)"
+
+          # The publish split from CLAUDE.md: release owns the branch with
+          # force_orphan, site keeps repo/ alive with keep_files, and the
+          # .flatpakref ships as a release asset only.
+          grep -q 'keep_files: true' .github/workflows/site.yml \
+            || note "site.yml lost keep_files: true (a site publish would wipe repo/)"
+          grep -q 'force_orphan: true' .github/workflows/release.yml \
+            || note "release.yml lost force_orphan: true"
+          grep -q 'cat > postcard.flatpakref' .github/workflows/release.yml \
+            || note "release.yml no longer writes postcard.flatpakref outside site/"
+          grep -q 'RuntimeRepo=' .github/workflows/release.yml \
+            || note "release.yml lost the RuntimeRepo line fresh machines need"
+
+          if [ -s "$out" ]; then cat "$out" >> "$GITHUB_STEP_SUMMARY"; else echo "release-smoke: healthy" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Check stale failures
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          mkdir -p health
+          out=health/stale-failures.md
+          : > "$out"
+
+          # A lone red run is a flake; a workflow that fails twice in the
+          # window is a pattern worth an issue.
+          gh run list --branch main --status failure --limit 20 \
+            --json name,createdAt,url > health/runs.json
+          python3 - >> "$out" <<'EOF'
+          import json
+          from collections import Counter
+          runs = json.load(open("health/runs.json"))
+          for name, n in sorted(Counter(r["name"] for r in runs).items()):
+              if n >= 2:
+                  latest = max(r["createdAt"] for r in runs if r["name"] == name)
+                  url = next(r["url"] for r in runs if r["name"] == name and r["createdAt"] == latest)
+                  print(f"- `{name}` failed {n} times on main in the last 20 failed runs (latest: {latest}, {url})")
+          EOF
+
+          if [ -s "$out" ]; then cat "$out" >> "$GITHUB_STEP_SUMMARY"; else echo "stale-failures: healthy" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Record performance baseline
+        run: |
+          set -u
+          mkdir -p health
+          : > health/perf.md
+
+          # Same host set tests.yml installs, minus lint/typing: the baseline
+          # is the suite's wall time, and live tests stay deselected by the
+          # repo's own addopts ("-m not live"), so no network is touched.
+          sudo apt-get update
+          sudo apt-get install -y python3-gi gir1.2-glib-2.0 \
+            gir1.2-gdkpixbuf-2.0 python3-cairo python3-pytest \
+            python3-dev libssl-dev
+          python3 -m pip install -q pytest sqlcipher3==0.6.4
+
+          start=$(date +%s)
+          python3 -m pytest -q --tb=no --durations=10 \
+            --junitxml=health/junit.xml > health/pytest.log 2>&1 || true
+          end=$(date +%s)
+          secs=$((end - start))
+          if [ -f health/junit.xml ]; then
+            eval "$(python3 -c "
+            import xml.etree.ElementTree as ET
+            r = ET.parse('health/junit.xml').getroot()
+            s = r.find('testsuite') if r.tag == 'testsuites' else r
+            print(f\"TESTS={s.get('tests', 0)} FAILURES={s.get('failures', 0)} ERRORS={s.get('errors', 0)} SKIPPED={s.get('skipped', 0)}\")
+            ")"
+          else
+            TESTS=0 FAILURES=0 ERRORS=0 SKIPPED=0
+            echo "- pytest produced no JUnit report (interrupted or crashed after ${secs}s)" >> health/perf.md
+          fi
+          echo "TESTS=$TESTS SECS=$secs FAILURES=$FAILURES ERRORS=$ERRORS SKIPPED=$SKIPPED" > health/perf.env
+          {
+            echo "suite: tests=$TESTS failures=$FAILURES errors=$ERRORS skipped=$SKIPPED seconds=$secs"
+            echo 'slowest tests:'
+            grep -A10 'slowest .* durations' health/pytest.log | head -12 || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # A red suite is itself a finding; timing is compared against the
+          # baseline in the tracking issue by the report step.
+          [ "$FAILURES" = "0" ] && [ "$ERRORS" = "0" ] \
+            || echo "- suite is red: $FAILURES failure(s), $ERRORS error(s) in $TESTS test(s) (${secs}s)" >> health/perf.md
+
+      - name: File or update tracking issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          open_issue() {
+            # Exact-title match over open issues: deterministic dedup.
+            gh issue list --state open --limit 100 --json number,title \
+              --jq ".[] | select(.title == \"$1\") | .number" | head -1
+          }
+
+          # --- perf baseline comparison (thresholds only file issues) ---
+          # Baseline format, kept in the tracking issue body:
+          #   <!-- baseline: tests=N seconds=S -->
+          # Findings: tests disappeared, wall time > 150% of baseline, or
+          # wall time over 600s absolute.
+          # shellcheck disable=SC1091
+          . health/perf.env
+          perf_num=$(open_issue "[hive-health] perf")
+          if [ -n "$perf_num" ]; then
+            prior=$(gh issue view "$perf_num" --json body --jq .body \
+              | grep -m1 -oE '<!-- baseline: tests=[0-9]+ seconds=[0-9]+ -->' || true)
+            if [ -n "$prior" ]; then
+              prior_tests=$(echo "$prior" | grep -oE 'tests=[0-9]+' | cut -d= -f2)
+              prior_secs=$(echo "$prior" | grep -oE 'seconds=[0-9]+' | cut -d= -f2)
+              [ "$TESTS" -ge "$prior_tests" ] \
+                || echo "- test count dropped: $TESTS now, baseline $prior_tests" >> health/perf.md
+              if [ "$prior_secs" -gt 0 ] && [ "$SECS" -gt $((prior_secs * 3 / 2)) ]; then
+                echo "- suite slowed: ${SECS}s now, baseline ${prior_secs}s (>150%)" >> health/perf.md
+              fi
+            fi
+          fi
+          [ "$SECS" -gt 600 ] \
+            && echo "- suite took ${SECS}s, over the 600s budget" >> health/perf.md || true
+          new_baseline="<!-- baseline: tests=$TESTS seconds=$SECS -->"
+
+          for slug in pins drift release-smoke stale-failures perf; do
+            title="[hive-health] $slug"
+            num=$(open_issue "$title")
+            file="health/$slug.md"
+            if [ -s "$file" ]; then
+              body="Findings from [health run]($run_url): ($(date -u +%Y-%m-%d))"
+              body="$body$(printf '\n\n%s' "$(cat "$file")")"
+              body="$body$(printf '\n\n%s' 'Triage: confirm, fix, or close with a reason. This loop only files issues — it never edits workflows, pins, or policy itself.')"
+              if [ "$slug" = "perf" ]; then body="$body$(printf '\n%s' "$new_baseline")"; fi
+              if [ -z "$num" ]; then
+                gh issue create --title "$title" --label stage/015-triage-needed --body "$body"
+              else
+                gh issue comment "$num" --body "$body"
+                if [ "$slug" = "perf" ]; then
+                  gh issue view "$num" --json body --jq .body > health/perf-body.md
+                  if grep -q '<!-- baseline:' health/perf-body.md; then
+                    sed -i -E "s|<!-- baseline: tests=[0-9]+ seconds=[0-9]+ -->|$new_baseline|" health/perf-body.md
+                  else
+                    printf '\n%s\n' "$new_baseline" >> health/perf-body.md
+                  fi
+                  gh issue edit "$num" --body-file health/perf-body.md
+                fi
+              fi
+            elif [ -n "$num" ]; then
+              if [ "$slug" = "perf" ]; then
+                gh issue comment "$num" --body "All clear as of [health run]($run_url): suite green, $TESTS tests in ${SECS}s. $new_baseline"
+              else
+                gh issue comment "$num" --body "All clear as of [health run]($run_url)."
+              fi
+              gh issue close "$num"
+            fi
+          done
