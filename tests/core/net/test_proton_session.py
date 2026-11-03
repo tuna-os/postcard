@@ -118,8 +118,6 @@ def test_process_failures_hide_secret_diagnostics(failure):
 
 
 def test_missing_helper_is_explicit():
-    with patch("shutil.which", return_value=None), pytest.raises(
-        ProtonError
-    ) as caught:
+    with patch("shutil.which", return_value=None), pytest.raises(ProtonError) as caught:
         helper_transport({})
     assert caught.value.code == "helper_missing"
