@@ -3,10 +3,13 @@
 # the Cargo.lock graph. Triage and exception policy: docs/supply-chain.md.
 #
 # The allow list below is the exact identifier union over the 282 locked
-# registry crates (enumerated from crates.io, 2026-11-03) plus both GPL-3
-# variants for this workspace, tutabridge-tuta, and the generated SDK crates
-# (whose license-file is stock GPL-3.0 text). A new license appearing in the
-# graph fails the check until a human allows it here.
+# registry crates (enumerated from crates.io, 2026-11-03) and the pinned
+# uniffi-rs git checkout, plus both GPL-3 variants for this workspace,
+# tutabridge-tuta, and the generated SDK crates (whose license-file is stock
+# GPL-3.0 text). MPL-2.0 is the uniffi crates' license: weak copyleft,
+# GPL-compatible, allowed consciously since this workspace is
+# GPL-3.0-or-later. A new license appearing in the graph fails the check
+# until a human allows it here.
 
 [licenses]
 allow = [
@@ -23,6 +26,7 @@ allow = [
     "LGPL-2.1-or-later",
     "MIT",
     "MIT-0",
+    "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
 ]
