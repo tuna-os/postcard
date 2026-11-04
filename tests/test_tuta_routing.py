@@ -26,6 +26,7 @@ from postcard.core.net.tuta_session import (
     MECHANISM_TUTA,
     TutaError,
 )
+from postcard.core.providers import settings_for_email
 
 SESSION = {
     "login": "ada@tuta.com",
@@ -196,6 +197,20 @@ def test_retry_guidance_follows_the_taxonomy(code, is_auth_failure):
     # Auth failures hide the Retry button: no retry fixes them. Outages and
     # refused versions keep it.
     assert classify(TutaError(code), TUTA_HOST)[0] is is_auth_failure
+
+
+def test_tuta_is_an_explicit_choice_not_a_domain_preset():
+    # Tuta onboarding opens its own dialog; no domain preset may route a
+    # Tuta address at IMAP settings, whatever the domain.
+    for address in (
+        "ada@tuta.com",
+        "ada@tutanota.com",
+        "ada@tutanota.de",
+        "ada@tuta.io",
+        "ada@keemail.me",
+        "ada@example.com",
+    ):
+        assert settings_for_email(address) is None
 
 
 def test_revoked_outage_and_refused_version_read_differently():

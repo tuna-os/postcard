@@ -18,8 +18,11 @@ PAGE_PROGRESS = "progress"
 PAGE_TOTP = "totp"
 
 # Second-factor failures that deserve another code, not the form: the code
-# may simply have rotated in the thirty seconds it took to type it.
-_RETRYABLE_TOTP = frozenset({"invalid_totp", "second_factor_failed"})
+# may simply have rotated in the thirty seconds it took to type it, and a
+# re-challenge after an attempt wants a fresh code, not a fresh password.
+_RETRYABLE_TOTP = frozenset(
+    {"invalid_totp", "second_factor_failed", "second_factor_required"}
+)
 
 
 @Gtk.Template(resource_path="/in/gxanshu/postcard/ui/tuta-dialog.ui")

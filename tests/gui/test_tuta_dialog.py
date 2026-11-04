@@ -48,6 +48,7 @@ _register_resources()
 
 import time
 
+from postcard.accounts_dialog import PostcardAccountsDialog
 from postcard.core.models.account import PROTOCOL_TUTA, TUTA_HOST
 from postcard.core.net.auth import Credential
 from postcard.core.net.tuta_session import MECHANISM_TUTA, TutaError
@@ -197,6 +198,28 @@ def test_an_expired_code_stays_on_the_totp_page(monkeypatch, tmp_path):
     db.close()
 
 
+def test_a_rechallenge_after_an_attempt_keeps_the_totp_page(monkeypatch, tmp_path):
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
+
+    def fake_login(email, password, totp=None):
+        raise TutaError("second_factor_required")
+
+    monkeypatch.setattr("postcard.tuta_dialog.tuta_session.login", fake_login)
+    dialog = PostcardTutaDialog(db)
+    fill_form(dialog)
+
+    dialog.sign_in_button.emit("clicked")
+    pump_main_loop_until(lambda: dialog.dialog_stack.get_visible_child_name() == "totp")
+    dialog.totp_row.set_text("001234")
+
+    dialog.totp_verify_button.emit("clicked")
+    pump_main_loop_until(lambda: dialog.totp_row.get_text() == "")
+
+    assert dialog.dialog_stack.get_visible_child_name() == "totp"
+    assert db.accounts() == []
+    db.close()
+
+
 def test_a_security_key_account_reports_itself_honestly(monkeypatch, tmp_path):
     db = Database(str(tmp_path / "postcard.db"), key=_KEY)
 
@@ -264,4 +287,15 @@ def test_an_existing_address_is_not_added_twice(monkeypatch, tmp_path):
 
     assert dialog.dialog_stack.get_visible_child_name() == "form"
     assert len(db.accounts()) == 1
+    db.close()
+
+
+def test_tuta_is_offered_from_the_accounts_dialog(tmp_path):
+    # No key gates the flow: the helper ships with the app, so the button is
+    # always up, unlike the OAuth ones.
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
+    dialog = PostcardAccountsDialog(db)
+
+    assert dialog.tuta_button.get_visible()
+
     db.close()
