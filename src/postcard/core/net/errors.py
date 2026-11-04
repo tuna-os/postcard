@@ -157,17 +157,41 @@ def _classify_proton(exc: ProtonError) -> tuple[bool, str]:
     return False, _("The experimental Proton operation failed. Try again later.")
 
 
-def _classify_tuta(exc: TutaError) -> tuple[bool, str]:
+def _classify_tuta(exc: TutaError) -> tuple[bool, str]:  # noqa: PLR0911, C901
+    # noqa PLR0911/C901: a dispatch table, like classify above. One return
+    # per error code is the clearest shape here; collapsing them into a dict
+    # costs readability.
     if exc.code == "helper_missing":
         return False, _("This build does not include the experimental Tuta helper.")
-    if exc.code in ("login_failed", "resume_failed"):
+    if exc.code == "login_failed":
+        return True, _("Tuta sign-in failed. Check the account password.")
+    if exc.code == "session_revoked":
+        return True, _(
+            "The Tuta session expired. Remove the account and add it again to sign in."
+        )
+    if exc.code == "session_invalid":
+        return True, _(
+            "The stored Tuta session is damaged. Remove the account and add it again."
+        )
+    if exc.code == "client_outdated":
         return False, _(
-            "Tuta sign-in could not be completed. Check the session and client version."
+            "Tuta refused this version of Postcard. Update the app to keep syncing."
         )
     if exc.code in ("second_factor_required", "invalid_totp", "second_factor_failed"):
         return True, _("Tuta requires a valid second-factor code.")
+    if exc.code == "unsupported_u2f":
+        return True, _(
+            "This Tuta account needs a security key (U2F), which is not supported yet."
+        )
+    if exc.code == "unsupported_webauthn":
+        return True, _(
+            "This Tuta account needs a security key (WebAuthn), which is not "
+            "supported yet."
+        )
     if exc.code == "unsupported_second_factor":
         return True, _("This Tuta second-factor method is not supported yet.")
+    if exc.code in ("transport_failed", "timeout"):
+        return False, _("Couldn't reach Tuta. Check your connection and try again.")
     if exc.code == "unsupported_operation":
         return False, _(
             "This operation is not supported by the experimental Tuta backend yet."

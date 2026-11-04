@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-glib-2.0 \
-            gir1.2-gdkpixbuf-2.0 python3-cairo \
+            gir1.2-gdkpixbuf-2.0 gir1.2-secret-1 python3-cairo \
             python3-dev libssl-dev
 
       # Lint + format + types, enforcing .claude/skills/coding-standards.
