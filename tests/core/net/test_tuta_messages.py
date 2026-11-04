@@ -77,12 +77,18 @@ def test_flag_mapping_does_not_claim_unsupported_starring():
 
         def request(self, *args, **kwargs):
             self.requests.append((args, kwargs))
+            return {"outcomes": [{"id": uid, "code": None} for uid in kwargs["ids"]]}
 
     session = Session()
-    tuta_messages.set_flags(session, ["list/message"], FLAG_SEEN, True)
+    (outcome,) = tuta_messages.set_flags(session, ["list/message"], FLAG_SEEN, True)
     assert session.requests == [
         (("mark_read",), {"ids": ["list/message"], "is_read": True})
     ]
+    assert (outcome.server_id, outcome.succeeded, outcome.error_code) == (
+        "list/message",
+        True,
+        None,
+    )
     with pytest.raises(TutaError):
         tuta_messages.set_flags(session, ["list/message"], FLAG_FLAGGED, True)
     assert len(session.requests) == 1
@@ -91,8 +97,15 @@ def test_flag_mapping_does_not_claim_unsupported_starring():
 def test_move_reports_successful_prefix_without_guessing_new_ids():
     class Session:
         def request(self, operation, **kwargs):
-            if kwargs["ids"] == ["list/b"]:
-                raise TutaError("request_failed")
+            assert operation == "move"
+            assert kwargs["destination"] == "folders/trash"
+            return {
+                "outcomes": [
+                    {"id": "list/a", "code": None},
+                    {"id": "list/b", "code": "request_failed"},
+                    {"id": "list/c", "code": "not_attempted"},
+                ]
+            }
 
     result = tuta_messages.move(
         Session(), ["list/a", "list/b", "list/c"], "folders/trash"
@@ -100,6 +113,7 @@ def test_move_reports_successful_prefix_without_guessing_new_ids():
     assert result.destination_uids == [None]
     assert result.failed_index == 1
     assert isinstance(result.error, TutaError)
+    assert result.error.code == "request_failed"
 
 
 def test_an_empty_flag_change_sends_no_request():
@@ -107,7 +121,102 @@ def test_an_empty_flag_change_sends_no_request():
         def request(self, *args, **kwargs):
             pytest.fail("an empty flag change reached the helper")
 
-    tuta_messages.set_flags(Session(), [], FLAG_SEEN, True)
+    assert tuta_messages.set_flags(Session(), [], FLAG_SEEN, True) == ()
+
+
+def test_large_batches_chunk_at_the_server_limit():
+    calls = []
+
+    class Session:
+        def request(self, operation, **kwargs):
+            calls.append(kwargs["ids"])
+            return {"outcomes": [{"id": uid, "code": None} for uid in kwargs["ids"]]}
+
+    ids = [f"list/{index}" for index in range(51)]
+    result = tuta_messages.move(Session(), ids, "folders/trash")
+    assert [len(call) for call in calls] == [50, 1]
+    assert result.failed_index is None
+    assert result.destination_uids == [None] * 51
+
+
+def test_a_failed_chunk_stops_before_later_chunks():
+    class Session:
+        def request(self, operation, **kwargs):
+            if len(kwargs["ids"]) == 50:
+                return {
+                    "outcomes": [{"id": uid, "code": None} for uid in kwargs["ids"]]
+                }
+            return {
+                "outcomes": [
+                    {"id": kwargs["ids"][0], "code": None},
+                    {"id": kwargs["ids"][1], "code": "request_failed"},
+                    {"id": kwargs["ids"][2], "code": "not_attempted"},
+                ]
+            }
+
+    ids = [f"list/{index}" for index in range(53)]
+    result = tuta_messages.move(Session(), ids, "folders/trash")
+    assert result.failed_index == 51
+    assert result.error.code == "request_failed"
+    assert result.destination_uids == [None] * 51
+
+
+def test_flag_outcomes_keep_per_id_honesty_with_a_not_attempted_tail():
+    class Session:
+        def request(self, operation, **kwargs):
+            if kwargs["ids"][0] == "list/0":
+                return {
+                    "outcomes": [{"id": uid, "code": None} for uid in kwargs["ids"]]
+                }
+            raise TutaError("transport_failed")
+
+    ids = [f"list/{index}" for index in range(52)]
+    outcomes = tuta_messages.set_flags(Session(), ids, FLAG_SEEN, True)
+    assert [outcome.succeeded for outcome in outcomes[:50]] == [True] * 50
+    assert [(o.server_id, o.error_code) for o in outcomes[50:]] == [
+        ("list/50", "transport_failed"),
+        ("list/51", "transport_failed"),
+    ]
+
+
+def test_a_transport_failure_marks_later_chunks_not_attempted():
+    class Session:
+        def request(self, operation, **kwargs):
+            raise TutaError("transport_failed")
+
+    outcomes = tuta_messages.set_flags(
+        Session(), [f"list/{index}" for index in range(51)], FLAG_SEEN, True
+    )
+    assert [o.error_code for o in outcomes[:50]] == ["transport_failed"] * 50
+    assert outcomes[50].error_code == "not_attempted"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"outcomes": [{"id": "list/a", "code": None}]},
+        {
+            "outcomes": [
+                {"id": "list/a", "code": None},
+                {"id": "list/WRONG", "code": None},
+            ]
+        },
+        {"outcomes": [{"id": "list/a", "code": 42}]},
+        {"outcomes": "yes"},
+        {},
+    ],
+)
+def test_mismatched_outcomes_are_corruption_not_partial_success(reply):
+    class Session:
+        def request(self, *args, **kwargs):
+            return reply
+
+    # A move reports rather than raises: a corrupt reply fails the batch at
+    # its head with the corruption code, never a guessed prefix.
+    result = tuta_messages.move(Session(), ["list/a", "list/b"], "folders/trash")
+    assert result.failed_index == 0
+    assert result.error.code == "invalid_response"
+    assert result.destination_uids == []
 
 
 def test_folder_rows_keep_their_server_stated_identity():

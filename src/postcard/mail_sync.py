@@ -550,6 +550,7 @@ _TUTA_CAPABILITIES = frozenset(
         Capability.FETCH_BODY,
         Capability.SET_FLAGS,
         Capability.MOVE,
+        Capability.SEND,
     }
 )
 
@@ -726,13 +727,12 @@ class _TutaDriver(ProviderDriver):
     def set_flags(
         self, _account: Account, credential: Credential, request: FlagRequest
     ) -> tuple[PerIdOutcome, ...]:
-        tuta_messages.set_flags(
+        return tuta_messages.set_flags(
             TutaSession(credential),
             list(request.uids),
             request.flag,
             request.should_add,
         )
-        return _succeeded(request.uids)
 
     def move(
         self, _account: Account, credential: Credential, request: MoveRequest
@@ -742,14 +742,50 @@ class _TutaDriver(ProviderDriver):
         )
 
     def send(
-        self, _account: Account, _credential: Credential, _request: SendRequest
+        self, account: Account, credential: Credential, request: SendRequest
     ) -> SendOutcome:
-        # Sending stays unavailable until native recipient encryption is ready.
-        raise TutaError("unsupported_operation")
+        """Send as ordinary Tuta mail; the server files the Sent copy itself.
+
+        The composer's explicit delivery choice travels with the queued row:
+        the composer only queues a Tuta send once ordinary delivery is
+        chosen, so reaching here is the confirmation. Tuta submits
+        atomically, so there is no partial refusal to narrow -- a failure is
+        either definitive (nothing sent, safe to retry) or `send_uncertain`
+        (possibly sent: the caller must terminal-fail it for a human, never
+        auto-retry it). Like Graph, the server files Sent itself, so there is
+        nothing to append -- but unlike Graph the server assigns its own
+        Message-ID, which is why sent_copy below cannot match by ours.
+        """
+        sent = tuta_messages.send_mime(
+            TutaSession(credential),
+            request.from_addr,
+            account.display_name,
+            request.raw,
+            list(request.recipients),
+            ordinary_confirmed=True,
+        )
+        if (
+            sent.internal_recipients is not None
+            and sent.external_recipients is not None
+        ):
+            logger.info(
+                "sent via Tuta (account %s): %d internal, %d external recipient(s)",
+                account.email,
+                sent.internal_recipients,
+                sent.external_recipients,
+            )
+        return SendOutcome(sent.sent_mail, None, None)
 
     def sent_copy(
         self, _account: Account, _credential: Credential, _message_id: str
     ) -> tuple[str, int | None] | None:
+        # The server assigns its own Message-ID at submit, so our id never
+        # matches a server copy: None honestly reports "no copy under this
+        # id". The success path still links up, through filed_uid: the next
+        # sync merges the Sent copy onto the filed row by its compound server
+        # id. The gap is the ambiguous retry, which can resend after a lost
+        # reply -- that is why `send_uncertain` must terminal-fail instead of
+        # retrying, and why SENT_COPY_LOOKUP stays off this driver.
         return None
 
 

@@ -26,10 +26,23 @@ MAX_IPC_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 class TutaError(Exception):
+    # Fixed per-code messages for the codes whose distinction must survive
+    # places that only keep str(error): the outbox row's last_error and log
+    # lines. Still a fixed vocabulary, never server text.
+    _MESSAGES = {
+        "send_uncertain": (
+            "The message may have been sent. Check Sent before retrying."
+        ),
+    }
+
     def __init__(self, code: str) -> None:
         # Error codes come from a fixed vocabulary, never server text.
         self.code = code
-        super().__init__("The experimental Tuta operation could not be completed.")
+        super().__init__(
+            self._MESSAGES.get(
+                code, "The experimental Tuta operation could not be completed."
+            )
+        )
 
 
 Transport = Callable[[dict], dict]
@@ -92,7 +105,14 @@ ERROR_CODES = frozenset(
         "invalid_request",
         "invalid_id",
         "invalid_page",
-        "invalid_move_batch",
+        "invalid_batch",
+        "invalid_recipient",
+        "sender_unknown",
+        "body_too_large",
+        "confidential_send_unsupported",
+        "ordinary_delivery_requires_consent",
+        "send_failed",
+        "send_uncertain",
         "login_failed",
         "resume_failed",
         "session_revoked",

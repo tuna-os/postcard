@@ -1417,7 +1417,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "crypto-primitives",
  "libc",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tokio",
