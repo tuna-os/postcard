@@ -261,23 +261,14 @@ def test_paging_past_the_oldest_message_returns_nothing(monkeypatch):
 
 
 class AppendingImap(FakeImap):
-    def __init__(
-        self,
-        reply=("OK", [b"[APPENDUID 1 7] APPEND completed"]),
-        appenduid=(None, [None]),
-    ):
+    def __init__(self, reply=("OK", [b"APPEND completed"])):
         super().__init__()
         self._reply = reply
-        self._appenduid = appenduid
         self.capabilities = ("IMAP4REV1", "X-GM-EXT-1")
 
     def append(self, *args):
         self.calls.append(args)
         return self._reply
-
-    def response(self, code):
-        assert code == "APPENDUID"
-        return self._appenduid
 
 
 def test_append_quotes_the_mailbox_and_stores_the_copy_as_read(monkeypatch):
@@ -299,7 +290,7 @@ def test_append_raises_when_the_server_refuses(monkeypatch):
 
 
 def test_append_returns_the_uidplus_assignment(monkeypatch):
-    imap = AppendingImap(appenduid=("OK", [b"38505 3955"]))
+    imap = AppendingImap(("OK", [b"[APPENDUID 38505 3955] APPEND completed"]))
     session = connect(monkeypatch, imap)
 
     assert session.append("Sent", b"raw") == (38505, "3955")
@@ -314,7 +305,17 @@ def test_append_without_uidplus_files_the_copy_but_returns_no_link(monkeypatch):
 
 
 def test_append_ignores_a_mangled_appenduid(monkeypatch):
-    session = connect(monkeypatch, AppendingImap(appenduid=("OK", [b"nonsense"])))
+    imap = AppendingImap(("OK", [b"[APPENDUID huh] APPEND completed"]))
+    session = connect(monkeypatch, imap)
+
+    assert session.append("Sent", b"raw") is None
+
+
+def test_append_ignores_digits_without_the_code(monkeypatch):
+    # A bare digit pair that is not an APPENDUID code links nothing: matching
+    # it would file the copy under another message's UID.
+    imap = AppendingImap(("OK", [b"APPEND completed in 2 tries"]))
+    session = connect(monkeypatch, imap)
 
     assert session.append("Sent", b"raw") is None
 

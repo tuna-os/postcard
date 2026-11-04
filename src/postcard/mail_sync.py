@@ -869,8 +869,8 @@ def _append_to_sent(
 # The Outbox as a state machine, worked from the main thread: claim a row
 # before its worker starts, complete or fail it when the worker reports back.
 # A crash between SMTP acceptance and completion leaves a sending row whose
-# mail may or may not have left, so a retry (attempts above 1) looks for its
-# own copy in Sent before touching SMTP -- the only proof either way.
+# mail may or may not have left, so every attempt looks for its own copy in
+# Sent before touching SMTP -- the only proof either way.
 
 # How many attempts a queued mail gets before it rests as terminal failed,
 # staying visible in the Outbox until the user deletes it.
@@ -921,12 +921,14 @@ def send_queued(
 ) -> SendOutcome:
     """Send one claimed Outbox mail, skipping SMTP when it already went out.
 
-    Runs on the worker thread: network only, like every other send. A first
-    attempt (attempts of 1) carries a fresh Message-ID no server can hold yet,
-    so it goes straight out; a retry looks for its own copy in Sent first and
-    files without resending when it finds one.
+    Runs on the worker thread: network only, like every other send. Every
+    attempt looks for its own copy in Sent first -- a retry whose last try
+    sent before dying must not re-send, and only a delivery already on record
+    proves the mail reached the outside. The check costs one Sent lookup per
+    send, and when Sent itself is unreachable the attempt fails rather than
+    sending mail the next retry could not recognize.
     """
-    if job.attempts > 1 and job.message_id:
+    if job.message_id:
         found = _sent_copy(account, credential, job.message_id)
         if found is not None:
             uid, uidvalidity = found

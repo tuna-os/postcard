@@ -2,8 +2,8 @@
 
 A mail is queued with its full envelope, claimed before its worker starts,
 and completed or failed when the worker reports back. A crash between SMTP
-acceptance and completion leaves a sending row; its retry looks for its own
-copy in Sent before touching SMTP, so the mail goes out exactly once.
+acceptance and completion leaves a sending row; every attempt looks for its
+own copy in Sent before touching SMTP, so the mail goes out exactly once.
 """
 
 import pytest
@@ -240,7 +240,9 @@ def test_failures_retry_until_the_cap_then_rest_failed(stored):
 # --- sending -----------------------------------------------------------------
 
 
-def test_a_first_attempt_sends_without_looking_in_sent(stored, servers):
+def test_a_first_attempt_checks_sent_before_sending(stored, servers):
+    # Even the first try looks, so a mail the last boot sent before dying is
+    # never sent twice; an empty Sent just sends.
     database, account = stored
     _smtp, imap, _graph = servers
     _outbox, _mail, job = _queued(
@@ -250,7 +252,7 @@ def test_a_first_attempt_sends_without_looking_in_sent(stored, servers):
     outcome = mail_sync.send_queued(_account(), CREDENTIAL, job)
 
     assert outcome.file_error is None
-    assert imap.searches == []
+    assert imap.searches == [MESSAGE_ID]
     [sent] = FakeSmtpSession.sends
     assert sent[1] == ["you@example.com", "bcc@example.com"]
 

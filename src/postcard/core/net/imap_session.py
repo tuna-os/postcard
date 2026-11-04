@@ -99,20 +99,22 @@ def _quote_mailbox(name: str) -> str:
     return f'"{escaped}"'
 
 
-def _parse_appenduid(response: object) -> tuple[int, str] | None:
+def _parse_appenduid(payload: object) -> tuple[int, str] | None:
     """The (UIDVALIDITY, UID) of an APPENDUID response code, or None.
 
-    The code reads "38505 3955": the validity the UID belongs to, then the UID
-    itself. Anything else -- no UIDPLUS, a mangled line -- means the copy went
-    in but unlinked, which is recorded as None rather than a failure.
+    imaplib keeps the tagged line's trailing data on the command's own
+    payload -- "[APPENDUID 38505 3955] APPEND completed" -- so the code is
+    read there, never from response(), which only sees untagged lines and
+    would miss it forever. Anything else -- no UIDPLUS, a mangled line --
+    means the copy went in but unlinked, recorded as None, never a failure.
     """
-    values = response if isinstance(response, (list, tuple)) else [response]
+    values = payload if isinstance(payload, (list, tuple)) else [payload]
     text = " ".join(
         value.decode("ascii", "replace") if isinstance(value, bytes) else str(value)
         for value in values
         if value is not None
     )
-    match = re.search(r"\b(\d+)\s+(\d+)\b", text)
+    match = re.search(r"APPENDUID\s+(\d+)\s+(\d+)", text)
     if match is None:
         return None
     return int(match.group(1)), match.group(2)
@@ -348,12 +350,12 @@ class ImapSession:
         the server assigned it under UIDPLUS, or None when the server sent no
         APPENDUID -- the copy is filed either way, only the link back is lost.
         """
-        imap = self._require_imap()
-        status, payload = imap.append(_quote_mailbox(mailbox), FLAG_SEEN, None, raw)
+        status, payload = self._require_imap().append(
+            _quote_mailbox(mailbox), FLAG_SEEN, None, raw
+        )
         if status != STATUS_OK:
             raise ImapError(f"could not append to {mailbox}: {payload}")
-        _status, response = imap.response("APPENDUID")
-        return _parse_appenduid(response)
+        return _parse_appenduid(payload)
 
     def store_flags(self, uids: str, flags: str, should_add: bool) -> None:
         """Add or remove flags (e.g. "\\Seen") on a UID set: "7" or "7,9,20"."""
