@@ -69,9 +69,12 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
             Gtk.Box folder_resize_handle {
               halign: end;
               width-request: 5;
+              focusable: true;
+              tooltip-text: _("Drag or press Left and Right to resize");
 
               accessibility {
                 label: _("Resize folder sidebar");
+                description: _("Left and Right resize, Home and End jump to the limits, 0 resets");
               }
             }
 
@@ -100,6 +103,10 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
 
                 child: Gtk.ListView folder_list {
                   styles ["navigation-sidebar"]
+
+                  accessibility {
+                    label: _("Folders");
+                  }
                 };
               };
             };
@@ -118,9 +125,12 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
                 Gtk.Box conversation_resize_handle {
                   halign: end;
                   width-request: 5;
+                  focusable: true;
+                  tooltip-text: _("Drag or press Left and Right to resize");
 
                   accessibility {
                     label: _("Resize conversation list");
+                    description: _("Left and Right resize, Home and End jump to the limits, 0 resets");
                   }
                 }
 
@@ -153,6 +163,10 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
                     child: Gtk.SearchEntry search_entry {
                       hexpand: true;
                       placeholder-text: _("Search mail");
+
+                      accessibility {
+                        label: _("Search mail");
+                      }
                     };
                   }
 
@@ -164,6 +178,10 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
 
                         child: Gtk.ListView conversation_list {
                           styles ["navigation-sidebar"]
+
+                          accessibility {
+                            label: _("Conversations");
+                          }
                         };
                       };
                     }
@@ -186,6 +204,10 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
                           width-request: 32;
                           height-request: 32;
                           halign: center;
+
+                          accessibility {
+                            label: _("Loading");
+                          }
                         };
                       };
                     }
@@ -293,6 +315,10 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
                         width-request: 32;
                         height-request: 32;
                         halign: center;
+
+                        accessibility {
+                          label: _("Loading");
+                        }
                       };
                     };
                   }
@@ -323,6 +349,10 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
 
                         child: Gtk.Box thread_box {
                           orientation: vertical;
+
+                          accessibility {
+                            label: _("Messages");
+                          }
                         };
                       }
                     };
