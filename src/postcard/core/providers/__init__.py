@@ -1,6 +1,64 @@
 from typing import NamedTuple
 
-from .models.account import SECURITY_STARTTLS, SECURITY_TLS
+from ..models.account import SECURITY_STARTTLS, SECURITY_TLS
+from .api import (
+    ENTRY_POINT_GROUP,
+    PROVIDER_API_VERSION,
+    TRUST_FILE_NAME,
+    Capability,
+    DisabledProviderError,
+    DuplicateProviderError,
+    FetchRequest,
+    FlagRequest,
+    IncompatibleProviderError,
+    MessageRequest,
+    MoveRequest,
+    PerIdOutcome,
+    ProviderDescriptor,
+    ProviderError,
+    SendOutcome,
+    SendRequest,
+    SyncCompleteness,
+    SyncResult,
+    UnknownProviderError,
+)
+from .driver import ProviderDriver
+from .registry import (
+    BUILTIN_IDS,
+    ProviderRegistry,
+    default_trust_path,
+    read_trust_list,
+)
+
+__all__ = [
+    "BUILTIN_IDS",
+    "ENTRY_POINT_GROUP",
+    "PROVIDER_API_VERSION",
+    "TRUST_FILE_NAME",
+    "Capability",
+    "DisabledProviderError",
+    "DuplicateProviderError",
+    "FetchRequest",
+    "FlagRequest",
+    "IncompatibleProviderError",
+    "MessageRequest",
+    "MoveRequest",
+    "PROVIDERS",
+    "PerIdOutcome",
+    "ProviderDescriptor",
+    "ProviderDriver",
+    "ProviderError",
+    "ProviderRegistry",
+    "ProviderSettings",
+    "SendOutcome",
+    "SendRequest",
+    "SyncCompleteness",
+    "SyncResult",
+    "UnknownProviderError",
+    "default_trust_path",
+    "read_trust_list",
+    "settings_for_email",
+]
 
 
 class ProviderSettings(NamedTuple):

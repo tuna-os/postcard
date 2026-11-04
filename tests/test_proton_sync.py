@@ -88,5 +88,4 @@ def test_database_round_trips_the_reserved_protocol():
     )
     assert saved.is_proton
     assert db.accounts()[0].is_proton
-    assert saved.is_pushless
     db.close()

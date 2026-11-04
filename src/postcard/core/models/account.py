@@ -101,22 +101,6 @@ class Account(GObject.Object):
         return self.protocol == PROTOCOL_JMAP
 
     @property
-    def is_pushless(self) -> bool:
-        """Whether this account's inbox can only be polled, never watched.
-
-        IMAP IDLE holds a connection open on the inbox; Graph, Tuta, Proton
-        and JMAP offer no push channel a desktop client can hold, so the
-        watcher polls instead. JMAP has an EventSource, but nothing holds it
-        yet. One predicate so the next protocol cannot be forgotten there.
-        """
-        return self.protocol in (
-            PROTOCOL_GRAPH,
-            PROTOCOL_TUTA,
-            PROTOCOL_PROTON,
-            PROTOCOL_JMAP,
-        )
-
-    @property
     def short_label(self) -> str:
         # Free to be a nickname: outgoing mail puts email in From:, never this.
         return self.display_name.strip() or self.email.partition("@")[0]
