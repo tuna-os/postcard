@@ -109,19 +109,24 @@ def test_default_descriptors_speak_this_build_api():
 
 
 @pytest.mark.parametrize(
-    "candidate",
+    ("candidate", "field"),
     [
-        FetchRequest(None, 50, 0, True),
-        MessageRequest("INBOX", "4", 1),
-        FlagRequest("INBOX", ("4",), "\\Seen", True, 1),
-        MoveRequest("INBOX", ("4",), "Archive", 1),
-        SendRequest("ada@example.com", ("bob@example.com",), b"raw"),
+        (FetchRequest(None, 50, 0, True), "folder"),
+        (MessageRequest("INBOX", "4", 1), "uid"),
+        (FlagRequest("INBOX", ("4",), "\\Seen", True, 1), "flag"),
+        (MoveRequest("INBOX", ("4",), "Archive", 1), "destination"),
+        (SendRequest("ada@example.com", ("bob@example.com",), b"raw"), "raw"),
     ],
 )
-def test_driver_requests_are_immutable(candidate):
-    """A worker thread's snapshot cannot be mutated from under it."""
+def test_driver_requests_are_immutable(candidate, field):
+    """A worker thread's snapshot cannot be mutated from under it.
+
+    Each candidate rebinds one of its own fields: assigning a name the
+    class never declared raises a version-dependent TypeError instead of
+    the FrozenInstanceError this proves.
+    """
     with pytest.raises(dataclasses.FrozenInstanceError):
-        candidate.folder = "other"
+        setattr(candidate, field, "other")
 
 
 def test_flag_and_move_requests_carry_tuples_not_lists():
