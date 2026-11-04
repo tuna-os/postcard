@@ -87,6 +87,7 @@ _INLINE_PWNED = '<script>document.title="pwned"</script>'
 # First load also starts the shared web process, which costs seconds cold
 # and longer on a loaded host; every wait below stays bounded regardless.
 LOAD_TIMEOUT = 45.0
+PARSE_TIMEOUT = 10.0
 SETTLE_SECONDS = 2.0
 
 
@@ -204,9 +205,20 @@ def _make_view(html, *, allow_remote_images=False):
         is_expanded=True,
     )
     assert loads == [True]
+    _wait_for_parse(view)
     webview = view._webview
     assert webview is not None
     return view, avatars, webview
+
+
+def _wait_for_parse(view, timeout=PARSE_TIMEOUT):
+    # MIME parsing runs on a worker; the webview only exists once its result
+    # lands back on the main loop.
+    _pump_until(
+        lambda: view.parsed is not None,
+        timeout,
+        lambda: f"parsed={view.parsed!r}",
+    )
 
 
 def _wait_for_load(webview, timeout=LOAD_TIMEOUT):
@@ -480,6 +492,7 @@ def test_collapsed_view_defers_the_renderer(working_renderer):
         toggle.emit("clicked")
 
         assert loads == [True]
+        _wait_for_parse(view)
         assert view._webview is not None
         _wait_for_load(view._webview)
     finally:
