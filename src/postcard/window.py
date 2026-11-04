@@ -75,6 +75,11 @@ logger = logging.getLogger(__name__)
 
 SETTING_FOLDER_WIDTH = "folder-sidebar-width"
 SETTING_CONVERSATION_WIDTH = "conversation-sidebar-width"
+
+# Keyboard resize steps for the sidebar handles: one arrow press moves the
+# edge a little, Shift+arrow moves it a lot.
+_RESIZE_KEY_STEP = 10
+_RESIZE_KEY_BIG_STEP = 50
 SETTING_ACCOUNT_DISPLAY_NAME = "show-account-display-name"
 
 # The desktop's 12h/24h choice (GNOME Settings > Date & Time). The sandbox
@@ -179,8 +184,6 @@ class PostcardMainWindow(Adw.ApplicationWindow):
 
         # Drag limits mirror the <range> in the gschema: the schema stops a bad
         # stored value, these stop a drag from producing one.
-        # ponytail: pointer-only resize, add a key-pressed controller on the
-        # handles if keyboard resizing turns out to matter.
         self._setup_sidebar_resize(
             self.folder_resize_handle, self.outer_split, SETTING_FOLDER_WIDTH, 180, 500
         )
@@ -438,6 +441,50 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         gesture.connect("drag-begin", on_begin)
         gesture.connect("drag-update", on_update)
         handle.add_controller(gesture)
+
+        # The drag is pointer-only, so the handle is also focusable (see the
+        # template) and carries a key controller with the same limits.
+        keys = Gtk.EventControllerKey()
+
+        def on_key_pressed(
+            _controller: Gtk.EventControllerKey,
+            keyval: int,
+            _keycode: int,
+            state: Gdk.ModifierType,
+        ) -> bool:
+            # Left/Right step the edge, Shift steps further, Home/End jump
+            # to the schema limits, and 0 restores the width GSettings still
+            # holds -- the value a restart would show. Drags and keys only
+            # persist on close, so reset always has something to restore.
+            width = int(split.get_min_sidebar_width())
+            if keyval in (
+                Gdk.KEY_Left,
+                Gdk.KEY_KP_Left,
+                Gdk.KEY_Right,
+                Gdk.KEY_KP_Right,
+            ):
+                widening = keyval in (Gdk.KEY_Right, Gdk.KEY_KP_Right)
+                # The handle rides the sidebar's trailing edge, which mirrors.
+                if handle.get_direction() is Gtk.TextDirection.RTL:
+                    widening = not widening
+                if state & Gdk.ModifierType.SHIFT_MASK:
+                    step = _RESIZE_KEY_BIG_STEP
+                else:
+                    step = _RESIZE_KEY_STEP
+                width += step if widening else -step
+            elif keyval in (Gdk.KEY_Home, Gdk.KEY_KP_Home):
+                width = lower
+            elif keyval in (Gdk.KEY_End, Gdk.KEY_KP_End):
+                width = upper
+            elif keyval in (Gdk.KEY_0, Gdk.KEY_KP_0):
+                width = self._settings.get_int(key)
+            else:
+                return False
+            self._pin_sidebar_width(split, min(max(width, lower), upper))
+            return True
+
+        keys.connect("key-pressed", on_key_pressed)
+        handle.add_controller(keys)
 
     @staticmethod
     def _pointer_x(gesture: Gtk.GestureDrag) -> float:
