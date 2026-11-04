@@ -49,7 +49,7 @@ ignore = [
     # affected. The helper runs locally (stdio, exits), matching the
     # advisory's own "local use is fine" workaround. Re-check 2027-05-01;
     # the tuta lane should file a tracking issue for removal/replacement.
-    { id = "RUSTSEC-2023-0071", reason = "no fixed release available; local-only use per advisory workarounds; re-check 2027-05-01" },
+    { id = "RUSTSEC-2023-0071", reason = "no fixed release available; local-only use per advisory workarounds; re-check 2027-05-01; see #46" },
 ]
 
 [bans]
@@ -59,7 +59,8 @@ multiple-versions = "warn"
 wildcards = "allow"
 
 [sources]
-# The locked graph uses crates.io plus path dependencies only (verified from
-# Cargo.lock: no git or alternate-registry sources), so anything else is denied.
+# The locked graph uses crates.io plus one pinned git checkout (uniffi-rs,
+# required by the generated SDK); anything else is denied.
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = ["https://github.com/mozilla/uniffi-rs"]
