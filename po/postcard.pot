@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-04 13:36+0000\n"
+"POT-Creation-Date: 2026-11-04 14:01+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -492,12 +492,12 @@ msgstr ""
 msgid "Could not open the browser."
 msgstr ""
 
-#: src/postcard/mail_sync.py:1696
+#: src/postcard/mail_sync.py:1703
 #, python-brace-format
 msgid "Today {time}"
 msgstr ""
 
-#: src/postcard/mail_sync.py:1698
+#: src/postcard/mail_sync.py:1705
 msgid "Yesterday"
 msgstr ""
 

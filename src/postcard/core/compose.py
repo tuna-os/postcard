@@ -226,6 +226,23 @@ def normalize_addresses(text: str) -> list[str]:
     return list(dict.fromkeys(addrs))
 
 
+def rotate_message_id(raw: bytes) -> tuple[bytes, str]:
+    """The message with a freshly minted Message-ID, plus the new id.
+
+    A refused-only retry is a new send to different recipients, so it must
+    not reuse the attempt's id: a server that auto-filed the first attempt
+    to Sent would make the retry's redelivery check read the mail as fully
+    sent and drop the refused recipients. Only the header changes; threading
+    headers, bodies and attachments are untouched.
+    """
+    headers = email.message_from_bytes(raw)
+    if "Message-ID" in headers:
+        del headers["Message-ID"]
+    fresh = email.utils.make_msgid()
+    headers["Message-ID"] = fresh
+    return headers.as_bytes(), fresh
+
+
 def build_envelope(to: str, cc: str, bcc: str) -> Envelope:
     """The composer recipient rows as a normalized envelope, Bcc kept apart."""
     return {
