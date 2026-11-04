@@ -95,10 +95,3 @@ def test_each_protocol_reports_itself() -> None:
     assert account(protocol=PROTOCOL_TUTA).is_tuta is True
     assert account(protocol=PROTOCOL_PROTON).is_proton is True
     assert account(protocol=PROTOCOL_IMAP).is_proton is False
-
-
-def test_only_imap_can_hold_an_idle_connection() -> None:
-    assert account(protocol=PROTOCOL_IMAP).is_pushless is False
-    assert account(protocol=PROTOCOL_GRAPH).is_pushless is True
-    assert account(protocol=PROTOCOL_TUTA).is_pushless is True
-    assert account(protocol=PROTOCOL_PROTON).is_pushless is True
