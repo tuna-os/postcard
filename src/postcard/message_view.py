@@ -1,5 +1,6 @@
 import logging
 import math
+import threading
 from collections.abc import Callable
 
 import gi
@@ -160,6 +161,7 @@ class MessageView(Gtk.Box):
         should_load_remote_images: bool = False,
         is_12_hour_clock: bool = False,
         delivered_to: str = "",
+        parse_guard: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.add_css_class("message-view")
@@ -171,9 +173,11 @@ class MessageView(Gtk.Box):
         self._on_rendered = on_rendered
         self._should_load_remote_images = should_load_remote_images
         self._is_12_hour_clock = is_12_hour_clock
+        self._parse_guard = parse_guard
         self._is_loaded = False
         self._is_loading = False
         self._is_released = False
+        self._parse_id = 0
         self._placeholder: Gtk.Widget | None = None
         self._webview: _BodyView | None = None
         self._html: str | None = None
@@ -245,12 +249,11 @@ class MessageView(Gtk.Box):
         if self._is_released:
             return
 
-        self._is_loading = False
-        if self._placeholder is not None:
-            self._body.remove(self._placeholder)
-            self._placeholder = None
-
         if raw is None:
+            self._is_loading = False
+            if self._placeholder is not None:
+                self._body.remove(self._placeholder)
+                self._placeholder = None
             label = Gtk.Label(
                 label=error or _("Couldn't load this message."), xalign=0, wrap=True
             )
@@ -258,22 +261,123 @@ class MessageView(Gtk.Box):
             self._body.append(label)
             return
 
+        # MIME parsing and base64 decoding stay off the main loop: a 50 MB
+        # message decodes for the better part of a second. The placeholder
+        # stays up until the worker's result lands below.
         self._is_loaded = True
         self.raw = raw
-        self.parsed = message_parser.parse_message(
-            raw, is_12_hour_clock=self._is_12_hour_clock
+        self._parse_id += 1
+        thread = threading.Thread(
+            target=self._parse_worker,
+            args=(raw, self._parse_id, self._is_12_hour_clock),
+            daemon=True,
         )
+        thread.start()
 
-        self._show_details(self.parsed)
+    # Runs on the worker thread: decode only, no Gtk access. Takes snapshots;
+    # the one thing read back off self is the parse generation, a single int,
+    # which the GIL makes atomic.
+    def _parse_worker(self, raw: bytes, parse_id: int, is_12_hour_clock: bool) -> None:
+        try:
+            parsed = message_parser.parse_message(
+                raw,
+                is_12_hour_clock=is_12_hour_clock,
+                is_cancelled=lambda: parse_id != self._parse_id,
+            )
+        except message_parser.ParseCancelledError:
+            return
+        except message_parser.MimeLimitError as error:
+            try:
+                headers = message_parser.parse_headers(
+                    raw, is_12_hour_clock=is_12_hour_clock
+                )
+            except message_parser.MimeLimitError:
+                headers = None
+            GLib.idle_add(self._on_parse_refused, headers, error, parse_id)
+            return
+        GLib.idle_add(self._on_parsed, parsed, parse_id)
 
-        if self.parsed.html_body:
-            self._show_html(self.parsed.html_body)
+    def _is_parse_current(self, parse_id: int) -> bool:
+        if self._is_released or parse_id != self._parse_id:
+            return False
+        # The owning window or account went away while the parse was running.
+        return self._parse_guard is None or self._parse_guard()
+
+    def _on_parsed(self, parsed: message_parser.ParsedMessage, parse_id: int) -> bool:
+        if not self._is_parse_current(parse_id):
+            return False
+
+        self._is_loading = False
+        if self._placeholder is not None:
+            self._body.remove(self._placeholder)
+            self._placeholder = None
+
+        self.parsed = parsed
+        self._show_details(parsed)
+
+        if parsed.html_body:
+            self._show_html(parsed.html_body)
         else:
-            self._show_text(self.parsed.text_body or "")
-        self._populate_attachments(self.parsed.attachments)
+            self._show_text(parsed.text_body or "")
+        self._populate_attachments(parsed.attachments)
 
         if self._on_rendered is not None:
             self._on_rendered(self)
+        return False
+
+    # A message over the MIME bounds: headers if they parsed, the reason, and
+    # the full raw bytes on demand. The bytes are never truncated to fit.
+    def _on_parse_refused(
+        self,
+        headers: message_parser.ParsedMessage | None,
+        error: message_parser.MimeLimitError,
+        parse_id: int,
+    ) -> bool:
+        if not self._is_parse_current(parse_id):
+            return False
+
+        logger.warning("refused to parse message %s: %s", self._email.message_id, error)
+        self._is_loading = False
+        if self._placeholder is not None:
+            self._body.remove(self._placeholder)
+            self._placeholder = None
+
+        if headers is not None:
+            self._show_details(headers)
+        banner = Adw.Banner(
+            title=self._refusal_title(error),
+            button_label=_("Save Full Message"),
+            revealed=True,
+        )
+        banner.connect("button-clicked", self._on_save_full_message_clicked)
+        self._body.append(banner)
+        return False
+
+    def _refusal_title(self, error: message_parser.MimeLimitError) -> str:
+        if isinstance(error, message_parser.TooManyPartsError):
+            return _(
+                "This message has over {limit} MIME parts, so its body isn't shown."
+            ).format(limit=error.limit)
+        if isinstance(error, message_parser.MessageTooLargeError):
+            return _(
+                "This message is {size}, over the {limit} limit,"
+                " so its body isn't shown."
+            ).format(
+                size=GLib.format_size(error.size_bytes),
+                limit=GLib.format_size(error.limit_bytes),
+            )
+        return _("This message couldn't be decoded, so its body isn't shown.")
+
+    def _on_save_full_message_clicked(self, _banner: Adw.Banner) -> None:
+        if self.raw is None:
+            return
+        self._on_save_attachment(
+            Attachment(
+                filename="message.eml",
+                mime_type="message/rfc822",
+                content=self.raw,
+            )
+        )
 
     # A collapsed Details section with the full From/To/Cc/Bcc/Date; the header
     # itself shows only the sender and their address.
@@ -509,6 +613,8 @@ class MessageView(Gtk.Box):
         memory until the cyclic collector came round.
         """
         self._is_released = True
+        # A parse still decoding notices on its next part and delivers nothing.
+        self._parse_id += 1
         if self._reload_id:
             GLib.source_remove(self._reload_id)
             self._reload_id = 0

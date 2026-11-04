@@ -28,7 +28,12 @@ from .composer_window import (
 from .conversation_row import ConversationRow
 from .core import avatars, compose, goa, secrets
 from .core.lifecycle import JobToken, Lifecycle
-from .core.mime.message_parser import ParsedMessage, Unsubscribe, parse_unsubscribe
+from .core.mime.message_parser import (
+    ParsedMessage,
+    Unsubscribe,
+    parse_unsubscribe,
+    write_file_atomically,
+)
 from .core.models.account import Account
 from .core.models.attachment import Attachment
 from .core.models.conversation import Conversation
@@ -2170,6 +2175,17 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             if account is not None and self._is_unified() and not is_outgoing
             else ""
         )
+        # One token for the thread's parse jobs: an account removed (or a window
+        # closed) mid-decode drops every completion instead of rendering it.
+        owner_id = account.id if account is not None else None
+        if owner_id is None and self._account is not None:
+            owner_id = self._account.id
+        parse_token = self._lifecycle.mint(owner_id) if owner_id is not None else None
+        parse_guard = (
+            partial(self._lifecycle.is_live, parse_token)
+            if parse_token is not None
+            else None
+        )
         emails = list(reversed(conversation.emails))
         for index, mail in enumerate(emails):
             is_newest = index == 0
@@ -2184,6 +2200,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 is_12_hour_clock=self._is_12_hour_clock,
                 delivered_to=delivered_to,
                 avatars=self._avatars,
+                parse_guard=parse_guard,
             )
             self.thread_box.append(view)
 
@@ -2334,24 +2351,53 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # Not /tmp: Flatpak gives the instance a private one, and the document
     # portal can't hand a file from there to another app -- the launch fails.
     def _open_attachment(self, attachment: Attachment) -> None:
+        token = (
+            self._lifecycle.mint(self._account.id)
+            if self._account is not None
+            else None
+        )
+        thread = threading.Thread(
+            target=self._open_attachment_worker,
+            args=(attachment.filename, attachment.content, token),
+            daemon=True,
+        )
+        thread.start()
+
+    # Runs on the worker thread: filesystem only, no Gtk/database access. Takes
+    # the name and bytes as snapshots; a large attachment must not block the
+    # loop on its way out to another app.
+    def _open_attachment_worker(
+        self, filename: str, content: bytes, token: JobToken | None
+    ) -> None:
         # Server-supplied name; "../../.bashrc" would otherwise escape the dir.
-        name = Path(attachment.filename).name or "attachment"
+        name = Path(filename).name or "attachment"
         directory = Path(GLib.get_user_cache_dir()) / "attachments"
         shutil.rmtree(directory, ignore_errors=True)  # keep only the newest copy
         path = directory / name
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(attachment.content)
+            write_file_atomically(path, content)
         except OSError:
             logger.exception("could not write attachment %s to %s", name, path)
-            self._toast(_("Couldn't open {name}.").format(name=attachment.filename))
+            GLib.idle_add(self._on_attachment_spooled, None, filename, token)
             return
+        GLib.idle_add(self._on_attachment_spooled, str(path), filename, token)
 
-        launcher = Gtk.FileLauncher(file=Gio.File.new_for_path(str(path)))
+    def _on_attachment_spooled(
+        self, path: str | None, filename: str, token: JobToken | None
+    ) -> bool:
+        if token is not None and not self._lifecycle.is_live(token):
+            return False
+        if path is None:
+            self._toast(_("Couldn't open {name}.").format(name=filename))
+            return False
+
+        launcher = Gtk.FileLauncher(file=Gio.File.new_for_path(path))
         # Server-supplied bytes: make the portal ask which app, so one click
         # can't hand an arbitrary file straight to its default handler.
         launcher.set_always_ask(True)
-        launcher.launch(self, None, self._on_launch_done, attachment.filename)
+        launcher.launch(self, None, self._on_launch_done, filename)
+        return False
 
     def _on_launch_done(
         self,

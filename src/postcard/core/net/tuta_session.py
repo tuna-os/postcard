@@ -15,6 +15,11 @@ MECHANISM_TUTA = "tuta-session"
 HELPER_NAME = "postcard-tuta"
 PROTOCOL_VERSION = 1
 HELPER_TIMEOUT_SECONDS = 100
+# A helper reply is JSON whose bulk is base64 bodies and attachments -- ASCII,
+# so one character is one byte where the size actually matters. Checked before
+# json.loads, so an unbounded reply never pays for the parse and the copies
+# after it.
+MAX_IPC_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 class TutaError(Exception):
@@ -45,6 +50,8 @@ def helper_transport(request: dict) -> dict:
         raise TutaError("helper_failed") from None
     if response.returncode != 0:
         raise TutaError("helper_failed")
+    if len(response.stdout) > MAX_IPC_RESPONSE_BYTES:
+        raise TutaError("response_too_large")
     try:
         reply = json.loads(response.stdout)
     except ValueError:
@@ -76,6 +83,7 @@ ERROR_CODES = frozenset(
     {
         "helper_missing",
         "helper_failed",
+        "response_too_large",
         "invalid_response",
         "unsupported_version",
         "invalid_request",
