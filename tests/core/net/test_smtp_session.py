@@ -4,7 +4,7 @@ import ssl
 import pytest
 
 from postcard.core.net.auth import MECHANISM_XOAUTH2, Credential
-from postcard.core.net.smtp_session import SmtpError, SmtpSession
+from postcard.core.net.smtp_session import SmtpError, SmtpRefusedError, SmtpSession
 
 
 class FakeSmtp:
@@ -71,17 +71,21 @@ def test_send_raw_succeeds_when_every_recipient_accepts(monkeypatch) -> None:
 
 def test_send_raw_raises_on_a_partial_refusal(monkeypatch) -> None:
     # sendmail reports per-recipient refusals by returning them, not by
-    # raising -- ignoring the return value reports the mail as sent.
+    # raising -- ignoring the return value reports the mail as sent. The
+    # refusal names who was refused and who already got it; the server's
+    # verbatim reason stays in the log, never in the message.
     refused = {"bob@example.com": (550, b"mailbox unavailable")}
     session = connect(monkeypatch, FakeSmtp(refused=refused))
 
-    with pytest.raises(
-        SmtpError,
-        match=r"could not send to bob@example.com.*550 mailbox unavailable",
-    ):
+    with pytest.raises(SmtpRefusedError) as caught:
         session.send_raw(
             "me@example.com", ["you@example.com", "bob@example.com"], b"raw"
         )
+
+    assert caught.value.refused == ("bob@example.com",)
+    assert caught.value.accepted == ("you@example.com",)
+    assert "bob@example.com" in str(caught.value)
+    assert "mailbox unavailable" not in str(caught.value)
 
 
 def test_send_raw_names_the_recipients_in_the_error(monkeypatch) -> None:

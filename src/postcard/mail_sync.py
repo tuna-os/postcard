@@ -761,7 +761,11 @@ def send_message(
 
     Raises when the mail did not go out. A Sent filing that fails after a
     successful send comes back as file_error instead of raising: raising there
-    would leave the mail in the Outbox to be sent a second time.
+    would leave the mail in the Outbox to be sent a second time. A refusal
+    for some recipients raises SmtpRefusedError naming who was refused and
+    who already got it -- and files nothing to Sent, since a Sent copy would
+    make the next attempt's redelivery check read the mail as fully sent and
+    drop the refused recipients.
     """
     if account.is_tuta:
         # Sending stays unavailable until native recipient encryption is ready.
@@ -916,6 +920,26 @@ def fail_queued_send(db: Database, email_id: int, error: str) -> OutboxState:
     return state
 
 
+def fail_refused_send(
+    db: Database, email_id: int, refused: tuple[str, ...], error: str
+) -> OutboxState:
+    """Record a refused-recipient attempt, terminal past the attempt cap.
+
+    Returns the state the row landed on. Only the refused recipients stay in
+    the envelope: the retry sends to them alone, never again to accepted ones.
+    error is diagnostics for the next drain to show, so it is classified
+    before it ever reaches the user.
+    """
+    send = db.queued_send(email_id)
+    if send is None:
+        return OutboxState.FAILED
+    state = (
+        OutboxState.FAILED if send.attempts >= MAX_SEND_ATTEMPTS else OutboxState.RETRY
+    )
+    db.fail_refused_outbox_email(email_id, list(refused), error, state)
+    return state
+
+
 def send_queued(
     account: Account, credential: Credential, job: QueuedSend
 ) -> SendOutcome:
@@ -926,7 +950,10 @@ def send_queued(
     sent before dying must not re-send, and only a delivery already on record
     proves the mail reached the outside. The check costs one Sent lookup per
     send, and when Sent itself is unreachable the attempt fails rather than
-    sending mail the next retry could not recognize.
+    sending mail the next retry could not recognize. A partial refusal
+    propagates as SmtpRefusedError: the caller narrows the envelope to the
+    refused recipients with fail_refused_send, so the retry sends to them
+    only.
     """
     if job.message_id:
         found = _sent_copy(account, credential, job.message_id)
