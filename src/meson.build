@@ -65,11 +65,18 @@ postcard_core_sources = [
   'postcard/core/avatars.py',
   'postcard/core/compose.py',
   'postcard/core/lifecycle.py',
-  'postcard/core/providers.py',
   'postcard/core/threader.py',
 ]
 
 python_installation.install_sources(postcard_core_sources, subdir: 'postcard/core')
+
+postcard_core_providers_sources = [
+  'postcard/core/providers/__init__.py',
+  'postcard/core/providers/api.py',
+  'postcard/core/providers/driver.py',
+  'postcard/core/providers/registry.py',
+]
+python_installation.install_sources(postcard_core_providers_sources, subdir: 'postcard/core/providers')
 
 postcard_core_models_sources = [
   'postcard/core/models/__init__.py',

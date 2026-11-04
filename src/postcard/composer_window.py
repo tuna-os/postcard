@@ -419,6 +419,7 @@ class PostcardComposerWindow(Adw.Window):
         self._body_html = _BLANK_LINE + body
         self._syncing = False
         self._is_sending = False
+        self._can_send = True
         self._is_editor_loaded = False
         # Whether closing should keep a draft: an untouched reply or a new
         # message holding only its signature is not one.
@@ -430,6 +431,16 @@ class PostcardComposerWindow(Adw.Window):
 
         self._build_actions()
         self._build_from_row(account)
+        # Built in code rather than the template: it only ever appears for an
+        # account whose provider cannot send.
+        self._delivery_banner = Adw.Banner(
+            title=_(
+                "Sending from this account isn't supported yet. "
+                "Closing keeps your message as a draft."
+            )
+        )
+        self.form.prepend(self._delivery_banner)
+        self._update_provider_support()
         self.to_row.set_text(to)
         self.cc_row.set_text(cc)
         self.bcc_row.set_text(bcc)
@@ -575,7 +586,21 @@ class PostcardComposerWindow(Adw.Window):
 
     def _on_from_changed(self, *_args: object) -> None:
         self._account = self._accounts[self.from_row.get_selected()]
+        self._update_provider_support()
+        self._update_send_sensitivity()
         self._mark_edited()
+
+    def _update_provider_support(self) -> None:
+        """Whether this account's provider can send, on the Send action.
+
+        Asked of the descriptor, so an account whose provider is unknown or
+        untrusted fails closed to a disabled Send and a banner -- never to a
+        send attempted against the wrong backend. Drafts still save locally.
+        """
+        self._can_send = mail_sync.provider_supports(
+            self._account.protocol, mail_sync.Capability.SEND
+        )
+        self._delivery_banner.set_revealed(not self._can_send)
 
     def _build_editor(self) -> None:
         manager = WebKit.UserContentManager()
@@ -697,7 +722,9 @@ class PostcardComposerWindow(Adw.Window):
     def _update_send_sensitivity(self, *_args: object) -> None:
         has_recipient = bool(self._to_addrs() or self._cc_addrs() or self._bcc_addrs())
         self._actions["send"].set_enabled(
-            has_recipient and bool(self.subject_row.get_text().strip())
+            self._can_send
+            and has_recipient
+            and bool(self.subject_row.get_text().strip())
         )
 
     def _preview_text(self) -> str:

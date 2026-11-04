@@ -916,6 +916,26 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             groups.append((account, folder, mails))
         return groups
 
+    def _selection_supports(
+        self, conversations: list[Conversation], capability: mail_sync.Capability
+    ) -> bool:
+        """Whether every selected conversation's provider can do this.
+
+        A conversation never spans folders, so its newest mail names the one
+        account judging it; a selection spanning accounts needs every one of
+        them on board. A conversation whose account is gone judges nothing --
+        _mails_by_folder already skips those -- and an unserved provider
+        fails closed through provider_supports.
+        """
+        for conversation in conversations:
+            origin = self._origin(conversation.latest)
+            if origin is None:
+                continue
+            account, _folder = origin
+            if not mail_sync.provider_supports(account.protocol, capability):
+                return False
+        return True
+
     def _on_toggle_read(self, _action: Gio.SimpleAction, _param: object) -> None:
         conversations = self._selected_conversations()
         if conversations:
@@ -1140,6 +1160,16 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         ):
             _register(actions, name, handler)
         _register(actions, "move", self._on_move, _MOVE_PARAM_TYPE)
+        selected = self._selected_conversations()
+        for names, capability in (
+            (("toggle-read", "toggle-star"), mail_sync.Capability.SET_FLAGS),
+            (("archive", "trash", "move"), mail_sync.Capability.MOVE),
+        ):
+            is_supported = self._selection_supports(selected, capability)
+            for name in names:
+                action = actions.lookup_action(name)
+                if isinstance(action, Gio.SimpleAction):
+                    action.set_enabled(is_supported)
         unsubscribe = actions.lookup_action("unsubscribe")
         if isinstance(unsubscribe, Gio.SimpleAction):
             unsubscribe.set_enabled(self._unsubscribe_target() is not None)
@@ -2248,7 +2278,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # Built per selection rather than per folder change: the menu lists one
         # account's folders, and a selection spanning accounts gets no menu.
         source = self._move_source(selected)
-        self.move_button.set_sensitive(source is not None)
+        can_move = self._selection_supports(selected, mail_sync.Capability.MOVE)
+        self.move_button.set_sensitive(source is not None and can_move)
         if source is not None:
             self.move_button.set_menu_model(self._build_move_menu("win", *source))
 
@@ -2265,6 +2296,20 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         else:
             self.star_button.set_icon_name("non-starred-symbolic")
             self.star_button.set_tooltip_text(_("Star"))
+
+        # Last: whatever the provider cannot do stays off, with the tooltip
+        # saying why instead of promising the action. The buttons follow their
+        # actions; only the menu button needs its own sensitivity.
+        if not self._selection_supports(selected, mail_sync.Capability.SET_FLAGS):
+            self._set_actions_enabled(("toggle-read", "toggle-star"), False)
+            self.mark_read_button.set_tooltip_text(
+                _("Marking read is not supported by this account")
+            )
+            self.star_button.set_tooltip_text(
+                _("Starring is not supported by this account")
+            )
+        if not can_move:
+            self._set_actions_enabled(("archive", "trash", "move"), False)
 
     # Empty the reading pane, releasing each view's WebView as it goes.
     def _clear_thread(self) -> None:

@@ -17,7 +17,14 @@ from urllib.parse import quote
 from .core.compose import extract_recipients
 from .core.lifecycle import Lifecycle
 from .core.mime.message_parser import clock_format
-from .core.models.account import Account
+from .core.models.account import (
+    PROTOCOL_GRAPH,
+    PROTOCOL_IMAP,
+    PROTOCOL_JMAP,
+    PROTOCOL_PROTON,
+    PROTOCOL_TUTA,
+    Account,
+)
 from .core.models.email import Email
 from .core.models.folder import Folder, FolderRole
 
@@ -47,6 +54,24 @@ from .core.net.imap_session import (
 from .core.net.proton_session import ProtonError
 from .core.net.smtp_session import SmtpSession
 from .core.net.tuta_session import TutaError, TutaSession
+
+# Re-exported: SyncResult and SendOutcome are the drivers' UI-independent
+# results, so they live in core.providers; callers keep reaching them here.
+from .core.providers import (
+    Capability,
+    FetchRequest,
+    FlagRequest,
+    MessageRequest,
+    MoveRequest,
+    PerIdOutcome,
+    ProviderDescriptor,
+    ProviderDriver,
+    ProviderError,
+    ProviderRegistry,
+    SendOutcome,
+    SendRequest,
+    SyncResult,
+)
 from .core.store.database import Database, OutboxState, QueuedSend
 from .core.threader import NO_SUBJECT
 
@@ -87,18 +112,6 @@ INBOX_MAILBOX = "INBOX"
 OUTBOX_FOLDER = "Outbox"
 SENT_FOLDER = "Sent"
 DRAFTS_FOLDER = "Drafts"
-
-
-@dataclass
-class SyncResult:
-    folders: list[MailboxInfo] = field(default_factory=list)
-    messages: list[MessageHeader] = field(default_factory=list)
-    folder: str = INBOX_MAILBOX
-    exists: int = 0  # total messages in the selected mailbox
-    offset: int = 0  # how far back from the newest this fetch reached
-    all_uids: set[str] | None = None  # authoritative UID snapshot for newest page
-    unread_counts: dict[str, int] = field(default_factory=dict)  # by mailbox name
-    uidvalidity: int | None = None  # what the UIDs above belong to; None on Graph
 
 
 # How long a pooled connection may sit idle before it is probed with a NOOP.
@@ -204,10 +217,30 @@ class _InboxWatcher:
             self._on_change(self._account.id)
 
     def _run(self) -> None:
-        if not self._account.is_pushless:
+        if self._should_idle():
             self._watch_idle()
         while not self._stop.wait(PUSHLESS_POLL_SECONDS):
             self._changed()
+
+    def _should_idle(self) -> bool:
+        """Whether this account's provider can hold an IDLE watch.
+
+        Asked of the driver, not the protocol string: a provider the registry
+        cannot serve -- unknown, untrusted, incompatible -- polls instead of
+        opening an IMAP connection it was never meant to use. The sync itself
+        still fails closed with the registry's error; the watcher just must
+        not be the thing that falls back.
+        """
+        try:
+            driver = driver_for(self._account.protocol)
+        except ProviderError:
+            logger.warning(
+                "no mail provider serves %s (account %s); polling its inbox",
+                self._account.protocol,
+                self._account.email,
+            )
+            return False
+        return driver.descriptor.supports(Capability.IDLE_PUSH)
 
     def _watch_idle(self) -> None:
         """Returns once stopped, or once the server turns out to have no IDLE."""
@@ -417,6 +450,371 @@ def invalidate_account(account_id: int) -> None:
         lifecycle.invalidate_account(account_id)
 
 
+# --- providers ---------------------------------------------------------------
+# The builtin drivers behind the provider registry. Each one is a thin
+# adapter: it unpacks the request and calls the existing per-backend function,
+# which still owns the pooling, delta links, throttle handling and key
+# contexts. The public operations above dispatch through driver_for and carry
+# no per-protocol branches of their own.
+
+_IMAP_CAPABILITIES = frozenset(
+    {
+        Capability.FETCH,
+        Capability.FETCH_BODY,
+        Capability.SET_FLAGS,
+        Capability.MOVE,
+        Capability.SEND,
+        Capability.SENT_COPY_LOOKUP,
+        Capability.IDLE_PUSH,
+    }
+)
+
+_GRAPH_CAPABILITIES = _IMAP_CAPABILITIES - {Capability.IDLE_PUSH}
+
+_TUTA_CAPABILITIES = frozenset(
+    {
+        Capability.FETCH,
+        Capability.FETCH_BODY,
+        Capability.SET_FLAGS,
+        Capability.MOVE,
+    }
+)
+
+
+def _succeeded(uids: Iterable[str]) -> tuple[PerIdOutcome, ...]:
+    """Every id reported a success. The backends below apply a flag change
+    atomically -- they raise rather than half-apply -- so reaching here means
+    each id in the batch went through."""
+    return tuple(PerIdOutcome(uid, True) for uid in uids)
+
+
+class _ImapDriver(ProviderDriver):
+    _descriptor = ProviderDescriptor(
+        id=PROTOCOL_IMAP,
+        display_name="IMAP/SMTP",
+        capabilities=_IMAP_CAPABILITIES,
+    )
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return self._descriptor
+
+    def fetch_mailbox(
+        self, account: Account, credential: Credential, request: FetchRequest
+    ) -> SyncResult:
+        return _fetch_imap_mailbox(
+            account,
+            credential,
+            request.folder,
+            request.limit,
+            request.offset,
+            request.should_count_unread,
+        )
+
+    def fetch_full_message(
+        self, account: Account, credential: Credential, request: MessageRequest
+    ) -> bytes:
+        return _fetch_imap_message(
+            account, credential, request.folder_name, request.uid, request.uidvalidity
+        )
+
+    def set_flags(
+        self, account: Account, credential: Credential, request: FlagRequest
+    ) -> tuple[PerIdOutcome, ...]:
+        if not request.uids:
+            return ()
+        return _set_imap_flags(
+            account,
+            credential,
+            request.folder_name,
+            request.uids,
+            request.flag,
+            request.should_add,
+            request.uidvalidity,
+        )
+
+    def move(
+        self, account: Account, credential: Credential, request: MoveRequest
+    ) -> MoveResult:
+        return _move_imap_messages(
+            account,
+            credential,
+            request.folder_name,
+            request.uids,
+            request.destination,
+            request.uidvalidity,
+        )
+
+    def send(
+        self, account: Account, credential: Credential, request: SendRequest
+    ) -> SendOutcome:
+        return _send_imap_message(
+            account,
+            credential,
+            request.from_addr,
+            list(request.recipients),
+            request.raw,
+        )
+
+    def sent_copy(
+        self, account: Account, credential: Credential, message_id: str
+    ) -> tuple[str, int | None] | None:
+        return _imap_sent_copy(account, credential, message_id)
+
+
+class _GraphDriver(ProviderDriver):
+    _descriptor = ProviderDescriptor(
+        id=PROTOCOL_GRAPH,
+        display_name="Microsoft 365",
+        capabilities=_GRAPH_CAPABILITIES,
+    )
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return self._descriptor
+
+    def fetch_mailbox(
+        self, account: Account, credential: Credential, request: FetchRequest
+    ) -> SyncResult:
+        return _fetch_graph_mailbox(
+            account,
+            credential,
+            request.folder,
+            request.limit,
+            request.offset,
+            request.should_count_unread,
+        )
+
+    def fetch_full_message(
+        self, _account: Account, credential: Credential, request: MessageRequest
+    ) -> bytes:
+        return graph_messages.fetch_mime(GraphSession(credential), request.uid)
+
+    def set_flags(
+        self, _account: Account, credential: Credential, request: FlagRequest
+    ) -> tuple[PerIdOutcome, ...]:
+        graph_messages.set_flags(
+            GraphSession(credential),
+            list(request.uids),
+            request.flag,
+            request.should_add,
+        )
+        return _succeeded(request.uids)
+
+    def move(
+        self, _account: Account, credential: Credential, request: MoveRequest
+    ) -> MoveResult:
+        return graph_messages.move(
+            GraphSession(credential), list(request.uids), request.destination
+        )
+
+    def send(
+        self, _account: Account, credential: Credential, request: SendRequest
+    ) -> SendOutcome:
+        # Exchange files the Sent copy itself, so there is nothing to append.
+        graph_send.send_mime(
+            GraphSession(credential), request.raw, list(request.recipients)
+        )
+        return SendOutcome(None, None, None)
+
+    def sent_copy(
+        self, _account: Account, credential: Credential, message_id: str
+    ) -> tuple[str, int | None] | None:
+        return _graph_sent_copy(credential, message_id)
+
+
+class _TutaDriver(ProviderDriver):
+    _descriptor = ProviderDescriptor(
+        id=PROTOCOL_TUTA,
+        display_name="Tuta",
+        capabilities=_TUTA_CAPABILITIES,
+    )
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return self._descriptor
+
+    def fetch_mailbox(
+        self, _account: Account, credential: Credential, request: FetchRequest
+    ) -> SyncResult:
+        return _fetch_tuta_mailbox(
+            credential, request.folder, request.limit, request.offset
+        )
+
+    def fetch_full_message(
+        self, _account: Account, credential: Credential, request: MessageRequest
+    ) -> bytes:
+        return tuta_messages.fetch_mime(TutaSession(credential), request.uid)
+
+    def set_flags(
+        self, _account: Account, credential: Credential, request: FlagRequest
+    ) -> tuple[PerIdOutcome, ...]:
+        tuta_messages.set_flags(
+            TutaSession(credential),
+            list(request.uids),
+            request.flag,
+            request.should_add,
+        )
+        return _succeeded(request.uids)
+
+    def move(
+        self, _account: Account, credential: Credential, request: MoveRequest
+    ) -> MoveResult:
+        return tuta_messages.move(
+            TutaSession(credential), list(request.uids), request.destination
+        )
+
+    def send(
+        self, _account: Account, _credential: Credential, _request: SendRequest
+    ) -> SendOutcome:
+        # Sending stays unavailable until native recipient encryption is ready.
+        raise TutaError("unsupported_operation")
+
+    def sent_copy(
+        self, _account: Account, _credential: Credential, _message_id: str
+    ) -> tuple[str, int | None] | None:
+        return None
+
+
+class _ProtonDriver(ProviderDriver):
+    _descriptor = ProviderDescriptor(
+        id=PROTOCOL_PROTON, display_name="Proton", capabilities=frozenset()
+    )
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return self._descriptor
+
+    def fetch_mailbox(
+        self, _account: Account, _credential: Credential, _request: FetchRequest
+    ) -> SyncResult:
+        raise ProtonError("unsupported_operation")
+
+    def fetch_full_message(
+        self, _account: Account, _credential: Credential, _request: MessageRequest
+    ) -> bytes:
+        raise ProtonError("unsupported_operation")
+
+    def set_flags(
+        self, _account: Account, _credential: Credential, _request: FlagRequest
+    ) -> tuple[PerIdOutcome, ...]:
+        raise ProtonError("unsupported_operation")
+
+    def move(
+        self, _account: Account, _credential: Credential, _request: MoveRequest
+    ) -> MoveResult:
+        raise ProtonError("unsupported_operation")
+
+    def send(
+        self, _account: Account, _credential: Credential, _request: SendRequest
+    ) -> SendOutcome:
+        raise ProtonError("unsupported_operation")
+
+    def sent_copy(
+        self, _account: Account, _credential: Credential, _message_id: str
+    ) -> tuple[str, int | None] | None:
+        return None
+
+
+class _JmapDriver(ProviderDriver):
+    """JMAP accounts, served over IMAP until a native JMAP driver lands.
+
+    Fastmail stores PROTOCOL_JMAP but syncs through the IMAP path today; this
+    driver keeps that behaviour while giving those accounts their own stable
+    id and descriptor. It is delegation, not a JMAP implementation.
+    """
+
+    _descriptor = ProviderDescriptor(
+        id=PROTOCOL_JMAP, display_name="JMAP", capabilities=_IMAP_CAPABILITIES
+    )
+
+    def __init__(self) -> None:
+        self._imap = _ImapDriver()
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return self._descriptor
+
+    def fetch_mailbox(
+        self, account: Account, credential: Credential, request: FetchRequest
+    ) -> SyncResult:
+        return self._imap.fetch_mailbox(account, credential, request)
+
+    def fetch_full_message(
+        self, account: Account, credential: Credential, request: MessageRequest
+    ) -> bytes:
+        return self._imap.fetch_full_message(account, credential, request)
+
+    def set_flags(
+        self, account: Account, credential: Credential, request: FlagRequest
+    ) -> tuple[PerIdOutcome, ...]:
+        return self._imap.set_flags(account, credential, request)
+
+    def move(
+        self, account: Account, credential: Credential, request: MoveRequest
+    ) -> MoveResult:
+        return self._imap.move(account, credential, request)
+
+    def send(
+        self, account: Account, credential: Credential, request: SendRequest
+    ) -> SendOutcome:
+        return self._imap.send(account, credential, request)
+
+    def sent_copy(
+        self, account: Account, credential: Credential, message_id: str
+    ) -> tuple[str, int | None] | None:
+        return self._imap.sent_copy(account, credential, message_id)
+
+
+def register_builtin_drivers(registry: ProviderRegistry) -> None:
+    """Register the drivers this build ships, first so no add-on can take one
+    of their ids."""
+    for driver in (
+        _ImapDriver(),
+        _GraphDriver(),
+        _TutaDriver(),
+        _ProtonDriver(),
+        _JmapDriver(),
+    ):
+        registry.register(driver)
+
+
+_provider_registry: ProviderRegistry | None = None
+
+
+def provider_registry() -> ProviderRegistry:
+    """The process-wide registry: builtins plus trusted add-ons.
+
+    Built once, so trusting another provider takes a restart to take effect.
+    Tests needing isolation build their own ProviderRegistry instead, or reset
+    this one through monkeypatch.
+    """
+    global _provider_registry
+    if _provider_registry is None:
+        registry = ProviderRegistry()
+        register_builtin_drivers(registry)
+        registry.discover()
+        _provider_registry = registry
+    return _provider_registry
+
+
+def driver_for(protocol: str) -> ProviderDriver:
+    """The driver serving this provider id. Raises fail-closed -- unknown,
+    disabled or incompatible -- and callers never fall back on seeing one."""
+    return provider_registry().driver_for(protocol)
+
+
+def provider_descriptor(protocol: str) -> ProviderDescriptor | None:
+    """This provider's descriptor, or None when no driver serves it."""
+    return provider_registry().descriptor_for(protocol)
+
+
+def provider_supports(protocol: str, capability: Capability) -> bool:
+    """Whether this provider can do this -- False for anything unserved."""
+    descriptor = provider_descriptor(protocol)
+    return descriptor is not None and descriptor.supports(capability)
+
+
 def inbox_name(folders: list[str]) -> str:
     """The server's inbox mailbox. IMAP calls it INBOX but servers vary the
     casing (Yahoo lists it as "Inbox"), so match by role and fall back to the
@@ -439,15 +837,27 @@ def fetch_mailbox(
     before that (used to load older mail on scroll).
     `should_count_unread` refreshes the badges of the folders this sync isn't
     fetching, which costs a STATUS round trip each -- see _unread_counts.
+
+    Dispatches to this account's provider driver; a provider the registry
+    cannot serve raises instead of falling back to another backend.
     """
-    if account.is_tuta:
-        return _fetch_tuta_mailbox(credential, folder, limit, offset)
-    if account.is_proton:
-        raise ProtonError("unsupported_operation")
-    if account.is_graph:
-        return _fetch_graph_mailbox(
-            account, credential, folder, limit, offset, should_count_unread
-        )
+    request = FetchRequest(
+        folder=folder,
+        limit=limit,
+        offset=offset,
+        should_count_unread=should_count_unread,
+    )
+    return driver_for(account.protocol).fetch_mailbox(account, credential, request)
+
+
+def _fetch_imap_mailbox(
+    account: Account,
+    credential: Credential,
+    folder: str | None,
+    limit: int,
+    offset: int,
+    should_count_unread: bool,
+) -> SyncResult:
     with _pooled_session(account, credential) as session:
         mailboxes = session.list_folders()
         target = folder or inbox_name([m.name for m in mailboxes])
@@ -648,12 +1058,17 @@ def fetch_full_message(
     uidvalidity: int | None,
 ) -> bytes:
     """Open one folder and download a single full message."""
-    if account.is_tuta:
-        return tuta_messages.fetch_mime(TutaSession(credential), uid)
-    if account.is_proton:
-        raise ProtonError("unsupported_operation")
-    if account.is_graph:
-        return graph_messages.fetch_mime(GraphSession(credential), uid)
+    request = MessageRequest(folder_name=folder_name, uid=uid, uidvalidity=uidvalidity)
+    return driver_for(account.protocol).fetch_full_message(account, credential, request)
+
+
+def _fetch_imap_message(
+    account: Account,
+    credential: Credential,
+    folder_name: str,
+    uid: str,
+    uidvalidity: int | None,
+) -> bytes:
     with _pooled_session(account, credential) as session:
         _select(session, folder_name, uidvalidity, is_readonly=True)
         return session.fetch_message(uid)
@@ -679,27 +1094,41 @@ def set_flag(
     should_add: bool,
     *,
     uidvalidity: int | None,
-) -> None:
+) -> tuple[PerIdOutcome, ...]:
     """Add or remove an IMAP flag on every message in a conversation.
 
     One STORE for the whole UID set rather than one per message, which made
     reading a long thread a round trip per message in it. An empty set is not
     an empty command but a malformed one, and a conversation can be entirely
     locally saved copies that have no UID yet -- see server_uids.
+
+    Returns each id's outcome; a provider the registry cannot serve raises.
     """
     if not uids:
-        return
-    if account.is_tuta:
-        tuta_messages.set_flags(TutaSession(credential), list(uids), flag, should_add)
-        return
-    if account.is_proton:
-        raise ProtonError("unsupported_operation")
-    if account.is_graph:
-        graph_messages.set_flags(GraphSession(credential), list(uids), flag, should_add)
-        return
+        return ()
+    request = FlagRequest(
+        folder_name=folder_name,
+        uids=tuple(uids),
+        flag=flag,
+        should_add=should_add,
+        uidvalidity=uidvalidity,
+    )
+    return driver_for(account.protocol).set_flags(account, credential, request)
+
+
+def _set_imap_flags(
+    account: Account,
+    credential: Credential,
+    folder_name: str,
+    uids: Sequence[str],
+    flag: str,
+    should_add: bool,
+    uidvalidity: int | None,
+) -> tuple[PerIdOutcome, ...]:
     with _pooled_session(account, credential) as session:
         _select(session, folder_name, uidvalidity, is_readonly=False)
         session.store_flags(",".join(uids), flag, should_add)
+    return tuple(PerIdOutcome(uid, True) for uid in uids)
 
 
 def move_messages(
@@ -712,12 +1141,23 @@ def move_messages(
     uidvalidity: int | None,
 ) -> MoveResult:
     """Move every message in a conversation to another mailbox."""
-    if account.is_tuta:
-        return tuta_messages.move(TutaSession(credential), uids, destination)
-    if account.is_proton:
-        raise ProtonError("unsupported_operation")
-    if account.is_graph:
-        return graph_messages.move(GraphSession(credential), uids, destination)
+    request = MoveRequest(
+        folder_name=folder_name,
+        uids=tuple(uids),
+        destination=destination,
+        uidvalidity=uidvalidity,
+    )
+    return driver_for(account.protocol).move(account, credential, request)
+
+
+def _move_imap_messages(
+    account: Account,
+    credential: Credential,
+    folder_name: str,
+    uids: Sequence[str],
+    destination: str,
+    uidvalidity: int | None,
+) -> MoveResult:
     with _pooled_session(account, credential) as session:
         _select(session, folder_name, uidvalidity, is_readonly=False)
         destination_uids = []
@@ -733,21 +1173,6 @@ def move_messages(
                     _discard_pooled(account.id)
                 return MoveResult(destination_uids, index, error)
     return MoveResult(destination_uids)
-
-
-@dataclass(frozen=True, slots=True)
-class SendOutcome:
-    """How a send went. The mail left; this says about its Sent copy.
-
-    filed_uid is the UID the server filed it under (UIDPLUS), or None when the
-    server files its own copy (Gmail, Exchange) or reports none. file_error is
-    set only when the send succeeded but the Sent filing failed after it --
-    the mail went out, so this must never send it again, only say so.
-    """
-
-    filed_uid: str | None
-    uidvalidity: int | None
-    file_error: Exception | None
 
 
 def send_message(
@@ -766,16 +1191,21 @@ def send_message(
     who already got it -- and files nothing to Sent, since a Sent copy would
     make the next attempt's redelivery check read the mail as fully sent and
     drop the refused recipients.
+
+    Dispatches to this account's provider driver; a provider the registry
+    cannot serve raises instead of falling back to another backend.
     """
-    if account.is_tuta:
-        # Sending stays unavailable until native recipient encryption is ready.
-        raise TutaError("unsupported_operation")
-    if account.is_proton:
-        raise ProtonError("unsupported_operation")
-    if account.is_graph:
-        # Exchange files the Sent copy itself, so there is nothing to append.
-        graph_send.send_mime(GraphSession(credential), raw, recipients)
-        return SendOutcome(None, None, None)
+    request = SendRequest(from_addr=from_addr, recipients=tuple(recipients), raw=raw)
+    return driver_for(account.protocol).send(account, credential, request)
+
+
+def _send_imap_message(
+    account: Account,
+    credential: Credential,
+    from_addr: str,
+    recipients: list[str],
+    raw: bytes,
+) -> SendOutcome:
     session = SmtpSession(account.smtp_host, account.smtp_port, account.smtp_security)
     session.connect()
 
@@ -983,10 +1413,12 @@ def _sent_copy(
     failing the attempt only retries it. Graph ids are immutable, so those
     carry no validity.
     """
-    if account.is_tuta or account.is_proton:
-        return None
-    if account.is_graph:
-        return _graph_sent_copy(credential, message_id)
+    return driver_for(account.protocol).sent_copy(account, credential, message_id)
+
+
+def _imap_sent_copy(
+    account: Account, credential: Credential, message_id: str
+) -> tuple[str, int | None] | None:
     with _pooled_session(account, credential) as session:
         sent = mailbox_with_role(
             (mailbox.name for mailbox in session.list_folders()),
