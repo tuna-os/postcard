@@ -53,6 +53,9 @@ class PostcardAccountsDialog(Adw.Dialog):
             self._rows.append(row)
 
     def _on_remove_clicked(self, _button: Gtk.Button, account_id: int) -> None:
+        # First: a re-added account reuses the rowid, so a completion landing
+        # after the rows go would otherwise file the old one's mail as its own.
+        mail_sync.invalidate_account(account_id)
         self._db.delete_account(account_id)
         secrets.clear_password(account_id)
         mail_sync.close_sessions(account_id)

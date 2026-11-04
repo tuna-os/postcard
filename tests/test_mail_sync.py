@@ -1,3 +1,4 @@
+import gc
 import queue
 import threading
 from datetime import date, datetime, timedelta
@@ -5,6 +6,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 import postcard.mail_sync as mail_sync
+from postcard.core.lifecycle import Lifecycle
 from postcard.core.models.account import Account
 from postcard.core.models.conversation import Conversation
 from postcard.core.models.email import Email
@@ -1288,3 +1290,46 @@ def test_a_failed_move_leaves_the_inbox_watcher_running(idling_imap, monkeypatch
     assert result.error is not None
     assert account().id in mail_sync._watchers
     assert not idling_imap.interrupted.is_set()
+
+
+def test_removal_reaches_every_registered_window():
+    first, second = Lifecycle(), Lifecycle()
+    mail_sync.register_lifecycle(first)
+    mail_sync.register_lifecycle(second)
+    first_token, second_token = first.mint(1), second.mint(1, "INBOX")
+
+    mail_sync.invalidate_account(1)
+
+    assert not first.is_live(first_token)
+    assert not second.is_live(second_token)
+
+
+def test_removal_leaves_other_accounts_jobs_alone():
+    lifecycle = Lifecycle()
+    mail_sync.register_lifecycle(lifecycle)
+    token = lifecycle.mint(2)
+
+    mail_sync.invalidate_account(1)
+
+    assert lifecycle.is_live(token)
+
+
+def test_an_unregistered_window_hears_nothing():
+    lifecycle = Lifecycle()
+    token = lifecycle.mint(1)
+
+    mail_sync.invalidate_account(1)
+
+    assert lifecycle.is_live(token)
+
+
+def test_a_closed_window_does_not_break_the_broadcast():
+    mail_sync.register_lifecycle(Lifecycle())
+    gc.collect()
+    survivor = Lifecycle()
+    mail_sync.register_lifecycle(survivor)
+    token = survivor.mint(1)
+
+    mail_sync.invalidate_account(1)
+
+    assert not survivor.is_live(token)

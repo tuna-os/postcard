@@ -27,6 +27,7 @@ from .composer_window import (
 )
 from .conversation_row import ConversationRow
 from .core import avatars, compose, goa, secrets
+from .core.lifecycle import JobToken, Lifecycle
 from .core.mime.message_parser import ParsedMessage, Unsubscribe, parse_unsubscribe
 from .core.models.account import Account
 from .core.models.attachment import Attachment
@@ -201,8 +202,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # flag change can repaint it without resplicing the whole list.
         self._bound_rows: dict[Conversation, ConversationRow] = {}
         # One entry per source mailbox of the same move, all committed (or
-        # undone) together by the single timer below.
-        self._pending_moves: list[PendingMove] = []
+        # undone) together by the single timer below. Each carries the token
+        # its undo window started under, so a commit past an account's removal
+        # knows its UIDs name another server's mail -- or no mail at all.
+        self._pending_moves: list[tuple[PendingMove, JobToken]] = []
         self._pending_move_timeout: int = 0
         self._pending_toast: Adw.Toast | None = None
         # Source UIDs stay protected while an optimistic move is pending or
@@ -243,6 +246,11 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # Same, for the Outbox: queued mail is only deleted once SMTP confirms
         # it, so a second drain over the same rows would send them twice.
         self._draining_account_ids: set[int] = set()
+        # Generations for this window's background jobs: every worker carries
+        # a token minted here, and its completion drops its result unless the
+        # account, folder and window it started under are all still the same.
+        self._lifecycle = Lifecycle()
+        mail_sync.register_lifecycle(self._lifecycle)
         self._sync_timer_id = 0
 
         self.connect("close-request", self._on_close_request)
@@ -460,6 +468,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             return True
 
         # Their callbacks would otherwise land on a window that is gone.
+        self._lifecycle.shutdown()
         mail_sync.close_sessions()
         self._network.disconnect(self._network_handler)
         self._settings.disconnect(self._avatar_handler)
@@ -543,6 +552,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._on_online_names, names)
 
     def _on_online_names(self, names: dict[str, str]) -> bool:
+        if self._lifecycle.is_shutdown:
+            return False
         for account in self._accounts.values():
             name = names.get(account.goa_id) if account.goa_id else None
             if name and name != account.display_name:
@@ -888,9 +899,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 flag=flag,
                 should_add=not value if is_flag_inverted else value,
             )
+            token = self._lifecycle.mint(account.id, folder.name)
             threading.Thread(
                 target=self._flag_worker,
-                args=(account, change, revert),
+                args=(account, change, revert, token),
                 daemon=True,
             ).start()
 
@@ -900,11 +912,12 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         account: Account,
         change: FlagChange,
         revert: Callable[[], None],
+        token: JobToken,
     ) -> None:
         credential = secrets.credential_for(account)
         if credential is None:
             logger.warning("could not sign in to account %s", account.email)
-            GLib.idle_add(self._on_flag_sign_in_failed, revert)
+            GLib.idle_add(self._on_flag_sign_in_failed, revert, token)
             return
 
         try:
@@ -925,9 +938,15 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 change.folder_name,
                 account.email,
             )
-            GLib.idle_add(self._on_action_failed, revert, account.imap_host, error)
+            GLib.idle_add(
+                self._on_action_failed, revert, account.imap_host, error, token
+            )
 
-    def _on_flag_sign_in_failed(self, revert: Callable[[], None]) -> bool:
+    def _on_flag_sign_in_failed(
+        self, revert: Callable[[], None], token: JobToken
+    ) -> bool:
+        if not self._lifecycle.is_live(token):
+            return False
         # The row was already updated optimistically, so leaving it would show a
         # read/starred state the server never got, until the next sync undid it.
         revert()
@@ -935,8 +954,14 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         return False
 
     def _on_action_failed(
-        self, revert: Callable[[], None], host: str, error: Exception
+        self,
+        revert: Callable[[], None],
+        host: str,
+        error: Exception,
+        token: JobToken,
     ) -> bool:
+        if not self._lifecycle.is_live(token):
+            return False
         revert()
         _is_auth_failure, message = errors.classify(error, host)
         self._toast(_("Action failed: {msg}").format(msg=message))
@@ -1151,7 +1176,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         dests: dict[int, Folder],
         verb: Callable[[int], str],
     ) -> None:
-        moves: list[PendingMove] = []
+        moves: list[tuple[PendingMove, JobToken]] = []
         for account, source, mails in self._mails_by_folder(conversations):
             dest = dests.get(account.id)
             if dest is None or dest.id == source.id:
@@ -1167,16 +1192,19 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 continue
             uids = [uid for _, uid in mails_with_uids]
             moves.append(
-                PendingMove(
-                    account=account,
-                    email_ids=[mail.id for mail, _ in mails_with_uids],
-                    uids=uids,
-                    originals=[
-                        (mail.id, source.id, uid) for mail, uid in mails_with_uids
-                    ],
-                    source=source,
-                    dest=dest,
-                    tombstones=[(source.id, uid) for uid in uids],
+                (
+                    PendingMove(
+                        account=account,
+                        email_ids=[mail.id for mail, _ in mails_with_uids],
+                        uids=uids,
+                        originals=[
+                            (mail.id, source.id, uid) for mail, uid in mails_with_uids
+                        ],
+                        source=source,
+                        dest=dest,
+                        tombstones=[(source.id, uid) for uid in uids],
+                    ),
+                    self._lifecycle.mint(account.id, source.name),
                 )
             )
         if not moves:
@@ -1186,7 +1214,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # leave the previous move's undo window running.
         self._commit_pending_moves()
 
-        for move in moves:
+        for move, _token in moves:
             self._db.move_emails(move.email_ids, move.dest.id)
             for tombstone in move.tombstones:
                 state = self._move_tombstones.setdefault(
@@ -1199,7 +1227,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
 
         # Only the conversations a bucket actually took with it: a selection can
         # span an account whose destination folder is missing.
-        moved_ids = {email_id for move in moves for email_id in move.email_ids}
+        moved_ids = {email_id for move, _token in moves for email_id in move.email_ids}
         moved = sum(
             any(mail.id in moved_ids for mail in conversation.emails)
             for conversation in conversations
@@ -1218,7 +1246,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         )
         self.toast_overlay.add_toast(toast)
 
-    def _clear_pending_moves(self) -> list[PendingMove]:
+    def _clear_pending_moves(self) -> list[tuple[PendingMove, JobToken]]:
         if self._pending_move_timeout:
             GLib.source_remove(self._pending_move_timeout)
             self._pending_move_timeout = 0
@@ -1227,7 +1255,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         return moves
 
     def _on_undo_move(self, _toast: Adw.Toast) -> None:
-        for pending in self._clear_pending_moves():
+        for pending, _token in self._clear_pending_moves():
             self._restore_move(pending)
 
     # The undo window elapsed — actually send the moves to the server. The
@@ -1242,9 +1270,14 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _commit_pending_moves(self) -> None:
         if self._pending_toast is not None:
             self._pending_toast.dismiss()
-        for pending in self._clear_pending_moves():
+        for pending, token in self._clear_pending_moves():
+            if not self._lifecycle.is_live(token):
+                # The undo window outlived the account or the source folder:
+                # signing in to move its UIDs would act on strangers' mail.
+                self._clear_move_tombstones(pending)
+                continue
             threading.Thread(
-                target=self._move_worker, args=(pending,), daemon=True
+                target=self._move_worker, args=(pending, token), daemon=True
             ).start()
 
     def _restore_move(self, pending: PendingMove) -> None:
@@ -1294,12 +1327,12 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 self._move_tombstones.pop((tombstone_folder_id, uid), None)
 
     # Runs on the worker thread: network only, no Gtk/database access.
-    def _move_worker(self, pending: PendingMove) -> None:
+    def _move_worker(self, pending: PendingMove, token: JobToken) -> None:
         account = pending.account
         credential = secrets.credential_for(account)
         if credential is None:
             logger.warning("could not sign in to account %s", account.email)
-            GLib.idle_add(self._on_move_sign_in_failed, pending)
+            GLib.idle_add(self._on_move_sign_in_failed, pending, token)
             return
 
         try:
@@ -1311,7 +1344,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 pending.dest.name,
                 uidvalidity=pending.source.uidvalidity,
             )
-            GLib.idle_add(self._on_move_result, pending, result)
+            GLib.idle_add(self._on_move_result, pending, token, result)
         except Exception as error:
             logger.exception(
                 "could not move %d message(s) from %s to %s (account %s)",
@@ -1320,11 +1353,16 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 pending.dest.name,
                 account.email,
             )
-            GLib.idle_add(self._on_move_failed, pending, account.imap_host, error)
+            GLib.idle_add(
+                self._on_move_failed, pending, account.imap_host, error, token
+            )
 
     def _on_move_result(
-        self, pending: PendingMove, result: mail_sync.MoveResult
+        self, pending: PendingMove, token: JobToken, result: mail_sync.MoveResult
     ) -> bool:
+        if not self._lifecycle.is_live(token):
+            self._clear_move_tombstones(pending)
+            return False
         completed = len(result.destination_uids)
         self._await_move_tombstones(pending, completed)
         completed_moves = list(
@@ -1360,15 +1398,21 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             self._toast(_("Move failed: {msg}").format(msg=message))
         return False
 
-    def _on_move_sign_in_failed(self, pending: PendingMove) -> bool:
+    def _on_move_sign_in_failed(self, pending: PendingMove, token: JobToken) -> bool:
+        if not self._lifecycle.is_live(token):
+            self._clear_move_tombstones(pending)
+            return False
         # The messages were already moved locally, so they have to come back.
         self._restore_move(pending)
         self._toast(_("Could not sign in to this account."))
         return False
 
     def _on_move_failed(
-        self, pending: PendingMove, host: str, error: Exception
+        self, pending: PendingMove, host: str, error: Exception, token: JobToken
     ) -> bool:
+        if not self._lifecycle.is_live(token):
+            self._clear_move_tombstones(pending)
+            return False
         self._restore_move(pending)
         _is_auth_failure, message = errors.classify(error, host)
         self._toast(_("Move failed: {msg}").format(msg=message))
@@ -2145,9 +2189,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             folder_name=folder.name,
             uidvalidity=folder.uidvalidity,
         )
+        token = self._lifecycle.mint(account.id, folder.name)
         thread = threading.Thread(
             target=self._body_worker,
-            args=(account, request, callback),
+            args=(account, request, callback, token),
             daemon=True,
         )
         thread.start()
@@ -2159,6 +2204,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         account: Account,
         request: BodyRequest,
         callback: LoadCallback,
+        token: JobToken,
     ) -> None:
         credential = secrets.credential_for(account)
         if credential is None:
@@ -2169,6 +2215,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 request.email_id,
                 None,
                 _("Could not sign in to this account."),
+                token,
             )
             return
 
@@ -2188,9 +2235,11 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 account.email,
             )
             _is_auth_failure, message = errors.classify(error, account.imap_host)
-            GLib.idle_add(self._deliver_body, callback, request.email_id, None, message)
+            GLib.idle_add(
+                self._deliver_body, callback, request.email_id, None, message, token
+            )
             return
-        GLib.idle_add(self._deliver_body, callback, request.email_id, raw, None)
+        GLib.idle_add(self._deliver_body, callback, request.email_id, raw, None, token)
 
     def _deliver_body(
         self,
@@ -2198,7 +2247,11 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         email_id: int,
         raw: bytes | None,
         error: str | None,
+        token: JobToken,
     ) -> bool:
+        # A body for a pruned folder would land on whatever row reused the id.
+        if not self._lifecycle.is_live(token):
+            return False
         if raw is not None:
             self._db.save_raw_message(email_id, raw)
         callback(raw, error)
@@ -2354,6 +2407,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # Not errors.classify(): it is for IMAP/SMTP and HTTPError
     # subclasses OSError, so it would answer "couldn't reach the mail server".
     def _on_unsubscribed(self, is_done: bool) -> bool:
+        if self._lifecycle.is_shutdown:
+            return False
         if not is_done:
             self._toast(_("Couldn't unsubscribe. The list didn't accept the request."))
             return False
@@ -2363,6 +2418,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # --- syncing, the Outbox, and the connection banner -------------------
 
     def _drain_outbox(self, account: Account) -> None:
+        if self._lifecycle.is_shutdown:
+            return
         if account.id in self._draining_account_ids:
             return
 
@@ -2384,9 +2441,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             return
 
         self._draining_account_ids.add(account.id)
+        token = self._lifecycle.mint(account.id)
         thread = threading.Thread(
             target=self._outbox_worker,
-            args=(account, jobs),
+            args=(account, token, jobs),
             daemon=True,
         )
         thread.start()
@@ -2397,6 +2455,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _outbox_worker(
         self,
         account: Account,
+        token: JobToken,
         jobs: list[tuple[int, str, list[str], bytes]],
     ) -> None:
         credential = secrets.credential_for(account)
@@ -2405,7 +2464,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 "could not sign in to %s; the Outbox stays queued", account.email
             )
             # Still report back, so the account isn't left marked as draining.
-            GLib.idle_add(self._on_outbox_drained, account, [])
+            GLib.idle_add(self._on_outbox_drained, account, token, [])
             return
 
         results: list[OutboxResult] = []
@@ -2425,12 +2484,19 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 results.append(OutboxResult(email_id, subject, raw, error))
             else:
                 results.append(OutboxResult(email_id, subject, raw, None))
-        GLib.idle_add(self._on_outbox_drained, account, results)
+        GLib.idle_add(self._on_outbox_drained, account, token, results)
 
-    # Files under the account that sent, not the open one; dropping a stale one would
-    # leave the mail in the Outbox to go out twice.
-    def _on_outbox_drained(self, account: Account, results: list[OutboxResult]) -> bool:
+    # Files under the account that sent, not the open one; dropping a result
+    # for the wrong open account would leave the mail in the Outbox to go out
+    # twice. A result for a removed account is dropped instead: its Outbox is
+    # already gone, and filing its Sent copy would recreate it -- or, with the
+    # rowid reused, file another account's mail as this one's.
+    def _on_outbox_drained(
+        self, account: Account, token: JobToken, results: list[OutboxResult]
+    ) -> bool:
         self._draining_account_ids.discard(account.id)
+        if not self._lifecycle.is_live(token):
+            return False
         sent: Folder | None = None
         sent_count = 0
         for result in results:
@@ -2486,6 +2552,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         offset: int = 0,
         should_count_unread: bool = True,
     ) -> None:
+        if self._lifecycle.is_shutdown:
+            return
         # Don't pile background syncs (folder clicks, the poll timer) on top of
         # one already running for the same account.
         if in_background and account.id in self._syncing_account_ids:
@@ -2494,9 +2562,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._set_syncing(account.id, True)
         if self.conversation_stack.get_visible_child_name() == PAGE_EMPTY:
             self.conversation_stack.set_visible_child_name(PAGE_LOADING)
+        token = self._lifecycle.mint(account.id)
         thread = threading.Thread(
             target=self._sync_worker,
-            args=(account, folder_name, offset, should_count_unread),
+            args=(account, token, folder_name, offset, should_count_unread),
             daemon=True,
         )
         thread.start()
@@ -2542,6 +2611,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # Synced as the inbox whatever folder is open, since that is where the
     # change is; the list on screen refreshes from the database either way.
     def _on_inbox_changed(self, account_id: int) -> bool:
+        if self._lifecycle.is_shutdown:
+            return False
         account = self._accounts.get(account_id)
         if account is None or not self._is_online:
             return False
@@ -2555,6 +2626,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _sync_worker(
         self,
         account: Account,
+        token: JobToken,
         folder_name: str | None,
         offset: int,
         should_count_unread: bool,
@@ -2565,6 +2637,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             GLib.idle_add(
                 self._on_sync_error,
                 account,
+                token,
                 True,
                 _("Could not sign in to this account."),
             )
@@ -2587,20 +2660,21 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 offset,
             )
             is_auth_failure, message = errors.classify(error, account.imap_host)
-            GLib.idle_add(self._on_sync_error, account, is_auth_failure, message)
+            GLib.idle_add(self._on_sync_error, account, token, is_auth_failure, message)
             return
-        GLib.idle_add(self._on_sync_done, account, result)
+        GLib.idle_add(self._on_sync_done, account, token, result)
 
-    # A sync still in flight when its account was deleted: filing its mail
-    # would recreate the folders that went with it.
-    def _is_stale(self, account: Account) -> bool:
-        return account.id not in self._accounts
-
-    def _on_sync_done(self, account: Account, result: mail_sync.SyncResult) -> bool:
-        # Before the staleness check: a dropped callback still has to release
+    def _on_sync_done(
+        self, account: Account, token: JobToken, result: mail_sync.SyncResult
+    ) -> bool:
+        # Before the liveness check: a dropped callback still has to release
         # the spinner and the Refresh button.
         self._set_syncing(account.id, False)
-        if self._is_stale(account):
+        # A sync still in flight when its account was deleted: filing its mail
+        # would recreate the folders that went with it -- or, with the rowid
+        # reused, file it under the account that took its place.
+        if not self._lifecycle.is_live(token):
+            self._resync_account_ids.discard(account.id)
             return False
 
         # Remember the open conversation so a background poll doesn't yank it.
@@ -2619,7 +2693,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             # Keeping only the local Outbox clears stale rows like a duplicate
             # "INBOX" from earlier versions.
             names = {box.name for box in mailboxes} | {mail_sync.OUTBOX_FOLDER}
-            self._db.prune_folders(account.id, names)
+            self._prune_folders(account.id, names)
 
         target = self._db.get_or_create_folder(
             account.id, result.folder, mail_sync.icon_for_folder(result.folder)
@@ -2635,6 +2709,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 result.folder,
                 account.email,
             )
+            # The cached UIDs are gone, and so is the meaning of any job that
+            # started under the old numbering.
+            self._lifecycle.invalidate_folder(account.id, result.folder)
             self._loaded_counts.pop(target.id, None)
             for key in [key for key in self._move_tombstones if key[0] == target.id]:
                 del self._move_tombstones[key]
@@ -2681,6 +2758,17 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             self._resync_account_ids.discard(account.id)
             self._start_sync(account, in_background=True)
         return False
+
+    def _prune_folders(self, account_id: int, keep_names: set[str]) -> None:
+        pruned = {
+            folder.name for folder in self._db.folders_for_account(account_id)
+        } - keep_names
+        self._db.prune_folders(account_id, keep_names)
+        # A body fetch or flag change still in flight on a pruned folder names
+        # rows that are gone: its result must not land on whatever reuses
+        # their ids.
+        for pruned_name in pruned:
+            self._lifecycle.invalidate_folder(account_id, pruned_name)
 
     def _store_mailboxes(
         self, account: Account, mailboxes: list[mail_sync.MailboxInfo]
@@ -2809,13 +2897,19 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._avatars.load(message.sender_address, send_with_face)
 
     def _on_sync_error(
-        self, account: Account, is_auth_failure: bool, message: str
+        self,
+        account: Account,
+        token: JobToken,
+        is_auth_failure: bool,
+        message: str,
     ) -> bool:
         self._set_syncing(account.id, False)
+        if self._lifecycle.is_shutdown:
+            return False
         # Another account's failure can leave the open folder on the spinner,
         # because _start_sync flips the stack for whichever account syncs.
         self._show_list_or_placeholder()
-        if self._is_stale(account):
+        if not self._lifecycle.is_live(token):
             return False
         self._sync_failures[account.id] = (message, is_auth_failure)
         self._show_sync_failures()
@@ -2897,6 +2991,11 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             self._syncing_account_ids.add(account_id)
         else:
             self._syncing_account_ids.discard(account_id)
+
+        # Past shutdown the widgets are gone, but the busy state above still
+        # has to release for the completions landing on the way out.
+        if self._lifecycle.is_shutdown:
+            return
 
         account_row = self._account_rows.get(account_id)
         if account_row is not None:

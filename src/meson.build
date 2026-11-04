@@ -60,6 +60,7 @@ postcard_core_sources = [
   'postcard/core/autostart.py',
   'postcard/core/avatars.py',
   'postcard/core/compose.py',
+  'postcard/core/lifecycle.py',
   'postcard/core/providers.py',
   'postcard/core/threader.py',
 ]

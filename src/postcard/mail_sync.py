@@ -4,6 +4,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from functools import lru_cache
 from gettext import gettext as _
 
+from .core.lifecycle import Lifecycle
 from .core.mime.message_parser import clock_format
 from .core.models.account import Account
 from .core.models.email import Email
@@ -390,6 +392,27 @@ def _discard_pooled(account_id: int) -> None:
     if entry is not None:
         entry.session = None
         entry.generation += 1
+
+
+# Every window's job generations. Weak so a closed window stops hearing about
+# removals once nothing else holds it; main thread only, like the windows.
+_lifecycles: weakref.WeakSet[Lifecycle] = weakref.WeakSet()
+
+
+def register_lifecycle(lifecycle: Lifecycle) -> None:
+    """Hear about account removals on this window's generations."""
+    _lifecycles.add(lifecycle)
+
+
+def invalidate_account(account_id: int) -> None:
+    """End every in-flight job for a removed or reconfigured account.
+
+    On every window's generations at once: a composer holds its own, and its
+    send must die with the account too. A re-added account reuses the rowid,
+    so this runs before its rows go, while the tokens still name the old one.
+    """
+    for lifecycle in list(_lifecycles):
+        lifecycle.invalidate_account(account_id)
 
 
 def inbox_name(folders: list[str]) -> str:

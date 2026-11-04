@@ -26,6 +26,7 @@ from gi.repository import (
 
 from . import mail_sync
 from .core import compose, secrets
+from .core.lifecycle import JobToken, Lifecycle
 from .core.models.account import Account
 from .core.models.attachment import Attachment
 from .core.net import errors
@@ -398,6 +399,11 @@ class PostcardComposerWindow(Adw.Window):
         super().__init__(application=app)
         self._db = db
         self._account = account
+        # Its own generations, so closing a main window never strands a send;
+        # account removal still reaches it through mail_sync's broadcast.
+        self._lifecycle = Lifecycle()
+        mail_sync.register_lifecycle(self._lifecycle)
+        self._is_destroyed = False
         self._attachments: list[Attachment] = []
         self._body_html = _BLANK_LINE + body
         self._syncing = False
@@ -428,6 +434,7 @@ class PostcardComposerWindow(Adw.Window):
             "toggled", self._on_extra_recipients_toggled
         )
         self.connect("close-request", self._on_close_request)
+        self.connect("destroy", self._on_destroyed)
         self.attach_button.connect("clicked", self._on_attach_clicked)
         self.add_controller(_shortcut_controller(_WINDOW_SHORTCUTS))
 
@@ -771,6 +778,10 @@ class PostcardComposerWindow(Adw.Window):
         self.attachments_list.remove(row)
         self.attachments_group.set_visible(bool(self._attachments))
 
+    def _on_destroyed(self, _window: Gtk.Window) -> None:
+        self._is_destroyed = True
+        self._lifecycle.shutdown()
+
     # Cancel is window.close, so a draft is kept however the window goes.
     def _on_close_request(self, _window: Adw.Window) -> bool:
         if self._is_sending:
@@ -860,9 +871,10 @@ class PostcardComposerWindow(Adw.Window):
         for widget in (self.cancel_button, self.form, self.format_bar):
             widget.set_sensitive(False)
 
+        token = self._lifecycle.mint(self._account.id)
         thread = threading.Thread(
             target=self._send_worker,
-            args=(self._account, row.id, subject, recipients, raw),
+            args=(self._account, row.id, subject, recipients, raw, token),
             daemon=True,
         )
         thread.start()
@@ -875,11 +887,16 @@ class PostcardComposerWindow(Adw.Window):
         subject: str,
         recipients: list[str],
         raw: bytes,
+        token: JobToken,
     ) -> None:
         credential = secrets.credential_for(account)
         if credential is None:
             logger.warning("could not sign in to account %s", account.email)
-            GLib.idle_add(self._on_send_failed, _("Could not sign in to this account."))
+            GLib.idle_add(
+                self._on_send_failed,
+                _("Could not sign in to this account."),
+                token,
+            )
             return
 
         try:
@@ -893,14 +910,26 @@ class PostcardComposerWindow(Adw.Window):
                 account.email,
             )
             _is_auth_failure, message = errors.classify(error, account.smtp_host)
-            GLib.idle_add(self._on_send_failed, message)
+            GLib.idle_add(self._on_send_failed, message, token)
             return
-        GLib.idle_add(self._on_send_done, account, email_id, subject, raw)
+        GLib.idle_add(self._on_send_done, account, email_id, subject, raw, token)
 
     # Back on the main thread: safe to touch the database and widgets.
     def _on_send_done(
-        self, account: Account, email_id: int, subject: str, raw: bytes
+        self,
+        account: Account,
+        email_id: int,
+        subject: str,
+        raw: bytes,
+        token: JobToken,
     ) -> bool:
+        # Past the account's removal there is no Sent folder to file under --
+        # and with the rowid reused, the Outbox row id may name another
+        # account's mail. The message itself went out, so just go away.
+        if not self._lifecycle.is_live(token):
+            if not self._is_destroyed:
+                self.destroy()
+            return False
         self._db.delete_email(email_id)
         sent = mail_sync.sent_folder(self._db, account.id)
         recipient, recipient_address = mail_sync.first_recipient(self.to_row.get_text())
@@ -920,7 +949,13 @@ class PostcardComposerWindow(Adw.Window):
         self.destroy()
         return False
 
-    def _on_send_failed(self, message: str) -> bool:
+    def _on_send_failed(self, message: str, token: JobToken) -> bool:
+        # Past the account's removal there is no Outbox left to have saved to,
+        # so the usual message would be a lie told about another account's row.
+        if not self._lifecycle.is_live(token):
+            if not self._is_destroyed:
+                self.destroy()
+            return False
         self.emit(
             "finished", _("Couldn't send: {msg}. Saved to Outbox.").format(msg=message)
         )
