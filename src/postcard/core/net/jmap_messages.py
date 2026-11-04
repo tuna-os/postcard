@@ -1,16 +1,28 @@
-"""Reading messages from a JMAP mailbox: Email/query paging plus Email/get."""
+"""Reading and changing messages in a JMAP mailbox: Email/query paging plus
+Email/get, per-type Email/changes, Email/set mutations, and EmailSubmission.
+
+State tokens are opaque strings that only move forward: every delta returns
+the new state beside its data, and the caller stores it after the cache
+commit lands. A failure never advances a cursor and never means "empty".
+"""
 
 import threading
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..models.message_header import MessageHeader
 from ..threader import NO_SUBJECT
 from .jmap_session import (
     CODE_HTTP,
+    CODE_INVALID_ARGUMENTS,
+    CODE_NO_SUBMISSION,
     JmapCall,
     JmapError,
     JmapSession,
+    SetError,
+    needs_full_sync,
+    parse_set_errors,
     raise_if_cancelled,
     result_or_raise,
 )
@@ -40,9 +52,9 @@ _HEADER_PROPERTIES = [
     "header:References:asText",
 ]
 
-# A stored query state the server no longer honours: the only way on is to
-# walk the mailbox over instead of asking what changed.
-_EXPIRED_STATE_ERRORS = frozenset({"cannotCalculateChanges"})
+# Properties that say where a message lives, for resolving an uncertain
+# submission without fetching its headers.
+_PLACEMENT_PROPERTIES = ["id", "mailboxIds"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +164,7 @@ def query_all_ids(
         try:
             return query_changes(jmap, mailbox_id, since_state, cancelled)
         except JmapError as error:
-            if error.code not in _EXPIRED_STATE_ERRORS:
+            if not needs_full_sync(error):
                 raise
     return _walk(jmap, mailbox_id, cancelled)
 
@@ -239,10 +251,12 @@ def fetch_emails(
     jmap: JmapSession,
     email_ids: list[str],
     cancelled: threading.Event | None = None,
+    properties: list[str] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """The messages' headers in id order, plus the ids the server no longer
     has. Ids go over in bounded batches, never the whole mailbox at once."""
     batch = min(_GET_BATCH, jmap.max_objects_in_get)
+    wanted = properties if properties else _HEADER_PROPERTIES
     found: dict[str, dict] = {}
     missing: list[str] = []
     for start in range(0, len(email_ids), batch):
@@ -254,7 +268,7 @@ def fetch_emails(
                     {
                         "accountId": jmap.account_id,
                         "ids": email_ids[start : start + batch],
-                        "properties": _HEADER_PROPERTIES,
+                        "properties": wanted,
                     },
                 )
             ],
@@ -317,3 +331,472 @@ def _iso_date(value: str) -> str:
         return datetime.fromisoformat(value).isoformat()
     except (TypeError, ValueError):
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class EmailChanges:
+    """What moved account-wide since a stored Email state: ids only, in no
+    particular order. The caller fetches what it keeps and drops destroyed."""
+
+    created: list[str]
+    updated: list[str]
+    destroyed: list[str]
+    new_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class EmailDelta:
+    """One account-wide delta pass: changed headers plus destroyed ids, and
+    the state the next pass resumes from -- stored only after the commit."""
+
+    headers: list[MessageHeader]
+    thread_ids: dict[str, str]
+    destroyed_ids: list[str]
+    not_found_ids: list[str]
+    new_state: str
+
+
+@dataclass(frozen=True, slots=True)
+class MailboxDelta:
+    """One mailbox pass against a stored query state. When is_full is set the
+    stored state had expired, so ids are the whole mailbox with removed empty
+    and the caller reconciles instead of applying changes."""
+
+    headers: list[MessageHeader]
+    thread_ids: dict[str, str]
+    removed_ids: list[str]
+    not_found_ids: list[str]
+    new_state: str
+    is_full: bool
+
+
+def current_email_state(
+    jmap: JmapSession, cancelled: threading.Event | None = None
+) -> str:
+    """The account's Email state now: an empty Email/get that answers with
+    nothing but the state a later delta resumes from."""
+    raise_if_cancelled(cancelled)
+    [answer] = jmap.request(
+        [
+            JmapCall(
+                "Email/get",
+                {"accountId": jmap.account_id, "ids": [], "properties": ["id"]},
+            )
+        ],
+        cancelled,
+    )
+    state = result_or_raise(answer).get("state")
+    if not isinstance(state, str) or not state:
+        raise JmapError(0, CODE_HTTP, "Email/get answered without a state")
+    return state
+
+
+def email_changes(
+    jmap: JmapSession,
+    since_state: str,
+    cancelled: threading.Event | None = None,
+) -> EmailChanges:
+    """The account-wide Email created/updated/destroyed since a stored state,
+    following hasMoreChanges to the end. An expired state raises
+    cannotCalculateChanges for the caller to answer with a full walk."""
+    created: list[str] = []
+    updated: list[str] = []
+    destroyed: list[str] = []
+    state = since_state
+    while True:
+        raise_if_cancelled(cancelled)
+        [answer] = jmap.request(
+            [
+                JmapCall(
+                    "Email/changes",
+                    {
+                        "accountId": jmap.account_id,
+                        "sinceState": state,
+                        "maxChanges": _QUERY_PAGE,
+                    },
+                )
+            ],
+            cancelled,
+        )
+        payload = result_or_raise(answer)
+        created.extend(_changed_ids(payload, "created"))
+        updated.extend(_changed_ids(payload, "updated"))
+        destroyed.extend(_changed_ids(payload, "destroyed"))
+        state = str(payload.get("newState") or state)
+        if not payload.get("hasMoreChanges"):
+            return EmailChanges(
+                created=created,
+                updated=updated,
+                destroyed=destroyed,
+                new_state=state,
+            )
+
+
+def sync_email_delta(
+    jmap: JmapSession,
+    since_state: str,
+    cancelled: threading.Event | None = None,
+) -> EmailDelta:
+    """One account-wide delta pass: the changed headers plus destroyed ids.
+    An expired state raises through needs_full_sync -- the caller re-walks
+    each mailbox, commits, and only then reads current_email_state."""
+    changes = email_changes(jmap, since_state, cancelled)
+    found, missing = fetch_emails(jmap, [*changes.created, *changes.updated], cancelled)
+    return EmailDelta(
+        headers=[message_header(item) for item in found],
+        thread_ids=thread_ids(found),
+        destroyed_ids=changes.destroyed,
+        not_found_ids=missing,
+        new_state=changes.new_state,
+    )
+
+
+def sync_mailbox_delta(
+    jmap: JmapSession,
+    mailbox_id: str,
+    since_state: str,
+    cancelled: threading.Event | None = None,
+) -> MailboxDelta:
+    """One mailbox pass against a stored query state: what entered or left,
+    plus the headers to store. An expired state walks the mailbox over and
+    sets is_full instead of failing; any other error raises with the stored
+    state untouched, so the next sync resumes where this one started."""
+    try:
+        result = query_changes(jmap, mailbox_id, since_state, cancelled)
+        is_full = False
+    except JmapError as error:
+        if not needs_full_sync(error):
+            raise
+        result = _walk(jmap, mailbox_id, cancelled)
+        is_full = True
+    found, missing = fetch_emails(jmap, result.ids, cancelled)
+    return MailboxDelta(
+        headers=[message_header(item) for item in found],
+        thread_ids=thread_ids(found),
+        removed_ids=result.removed_ids,
+        not_found_ids=missing,
+        new_state=result.query_state,
+        is_full=is_full,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EmailSetResult:
+    """What an Email/set applied: creation ids to their server echo, updated
+    and destroyed ids, and per-object refusals keyed by id or creation id.
+    A partial failure still applies its siblings, so errors are returned."""
+
+    created: dict[str, dict]
+    updated: list[str]
+    destroyed: list[str]
+    errors: dict[str, SetError] = field(default_factory=dict)
+
+
+def set_emails(
+    jmap: JmapSession,
+    update: Mapping[str, Mapping[str, object]] | None = None,
+    destroy: Sequence[str] | None = None,
+    if_in_state: str | None = None,
+    cancelled: threading.Event | None = None,
+) -> EmailSetResult:
+    """Patch and/or destroy emails in bounded /set calls: flags, mailbox
+    membership, deletes. A stateMismatch raises for the caller to re-read and
+    rebuild the change; per-object refusals come back in errors."""
+    updates = dict(update or {})
+    doomed = list(destroy or [])
+    if not updates and not doomed:
+        raise JmapError(0, CODE_INVALID_ARGUMENTS, "Email/set needs an update")
+    batch = max(1, min(_GET_BATCH, jmap.max_objects_in_set))
+    merged = EmailSetResult(created={}, updated=[], destroyed=[], errors={})
+    for start in range(0, len(updates), batch):
+        chunk = dict(list(updates.items())[start : start + batch])
+        _apply_set(jmap, {"update": chunk}, if_in_state, cancelled, merged)
+    for start in range(0, len(doomed), batch):
+        _apply_set(
+            jmap,
+            {"destroy": doomed[start : start + batch]},
+            if_in_state,
+            cancelled,
+            merged,
+        )
+    return merged
+
+
+def create_emails(
+    jmap: JmapSession,
+    create: Mapping[str, Mapping[str, object]],
+    cancelled: threading.Event | None = None,
+) -> EmailSetResult:
+    """Create emails from client creation ids (a draft from an uploaded blob):
+    the server echo per creation id, or per-object refusals in errors."""
+    if not create:
+        raise JmapError(0, CODE_INVALID_ARGUMENTS, "Email/set needs a create")
+    batch = max(1, min(_GET_BATCH, jmap.max_objects_in_set))
+    merged = EmailSetResult(created={}, updated=[], destroyed=[], errors={})
+    entries = list(create.items())
+    for start in range(0, len(entries), batch):
+        _apply_set(
+            jmap,
+            {"create": dict(entries[start : start + batch])},
+            None,
+            cancelled,
+            merged,
+        )
+    return merged
+
+
+def set_keywords(
+    jmap: JmapSession,
+    email_ids: Sequence[str],
+    add: Sequence[str] = (),
+    remove: Sequence[str] = (),
+    cancelled: threading.Event | None = None,
+) -> EmailSetResult:
+    """Add and/or remove keywords ($seen, $flagged, ...) on emails. No ids is
+    a no-op without network traffic; no keywords is a caller bug."""
+    ids = list(email_ids)
+    if not ids:
+        return EmailSetResult(created={}, updated=[], destroyed=[], errors={})
+    if not add and not remove:
+        raise JmapError(0, CODE_INVALID_ARGUMENTS, "set_keywords needs a keyword")
+    patch: dict[str, bool | None] = {f"keywords/{keyword}": True for keyword in add}
+    patch.update({f"keywords/{keyword}": None for keyword in remove})
+    return set_emails(
+        jmap, {email_id: dict(patch) for email_id in ids}, None, None, cancelled
+    )
+
+
+def mark_read(
+    jmap: JmapSession,
+    email_ids: Sequence[str],
+    read: bool,
+    cancelled: threading.Event | None = None,
+) -> EmailSetResult:
+    """Set $seen on emails (or clear it to mark unread)."""
+    if read:
+        return set_keywords(jmap, email_ids, ("$seen",), (), cancelled)
+    return set_keywords(jmap, email_ids, (), ("$seen",), cancelled)
+
+
+def mark_starred(
+    jmap: JmapSession,
+    email_ids: Sequence[str],
+    starred: bool,
+    cancelled: threading.Event | None = None,
+) -> EmailSetResult:
+    """Set $flagged on emails (or clear it to unstar)."""
+    if starred:
+        return set_keywords(jmap, email_ids, ("$flagged",), (), cancelled)
+    return set_keywords(jmap, email_ids, (), ("$flagged",), cancelled)
+
+
+def move_emails(
+    jmap: JmapSession,
+    email_ids: Sequence[str],
+    add_mailbox_ids: Sequence[str],
+    remove_mailbox_ids: Sequence[str],
+    cancelled: threading.Event | None = None,
+) -> EmailSetResult:
+    """Change mailbox membership: archive and move are the same call with
+    different ids. Ids are opaque server strings, never names or numbers, and
+    patch segments are escaped so any id survives the trip."""
+    ids = list(email_ids)
+    if not add_mailbox_ids and not remove_mailbox_ids:
+        raise JmapError(0, CODE_INVALID_ARGUMENTS, "move_emails needs a mailbox")
+    if not ids:
+        return EmailSetResult(created={}, updated=[], destroyed=[], errors={})
+    patch: dict[str, bool | None] = {
+        f"mailboxIds/{_escape_segment(mailbox_id)}": True
+        for mailbox_id in add_mailbox_ids
+    }
+    patch.update(
+        {
+            f"mailboxIds/{_escape_segment(mailbox_id)}": None
+            for mailbox_id in remove_mailbox_ids
+        }
+    )
+    return set_emails(
+        jmap, {email_id: dict(patch) for email_id in ids}, None, None, cancelled
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitRequest:
+    """One message to hand to the server's outbox: the draft's id, and
+    optionally whose identity sends it and what a success updates."""
+
+    email_id: str
+    identity_id: str | None = None
+    envelope: Mapping[str, object] | None = None
+    on_success_update: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionResult:
+    """What a submission attempt found out. Exactly one of submission_id and
+    error is set on a decided attempt; is_uncertain means the request went out
+    but no answer came back, so the message may or may not be sent -- resolve
+    it with resolve_uncertain_submission, never by resubmitting blindly."""
+
+    email_id: str
+    submission_id: str | None = None
+    error: SetError | None = None
+    is_uncertain: bool = False
+    cause: str = ""
+
+
+def submit_email(
+    jmap: JmapSession,
+    draft: SubmitRequest,
+    cancelled: threading.Event | None = None,
+) -> SubmissionResult:
+    """Submit a draft for sending. The submission id is the durable handle:
+    store it before confirming, and confirm with confirm_submission. A refused
+    submission comes back in error; a lost answer comes back is_uncertain."""
+    if not jmap.submission_supported:
+        raise JmapError(0, CODE_NO_SUBMISSION, "the server offers no EmailSubmission")
+    creation = _submission_creation(draft)
+    try:
+        [answer] = jmap.request(
+            [
+                JmapCall(
+                    "EmailSubmission/set",
+                    {"accountId": jmap.account_id, "create": {"s1": creation}},
+                )
+            ],
+            cancelled,
+        )
+    except OSError as error:
+        # No answer at all: the server may have queued the message before the
+        # connection died. Report, don't retry -- a retry may send it twice.
+        return SubmissionResult(draft.email_id, is_uncertain=True, cause=str(error))
+    except JmapError as error:
+        if error.status >= 500:
+            return SubmissionResult(draft.email_id, is_uncertain=True, cause=str(error))
+        raise
+    return _submission_result(draft.email_id, result_or_raise(answer))
+
+
+def _submission_creation(draft: SubmitRequest) -> dict[str, object]:
+    """The EmailSubmission/set create object: the draft plus whatever sending
+    options the caller set."""
+    creation: dict[str, object] = {"emailId": draft.email_id}
+    if draft.identity_id is not None:
+        creation["identityId"] = draft.identity_id
+    if draft.envelope is not None:
+        creation["envelope"] = dict(draft.envelope)
+    if draft.on_success_update is not None:
+        creation["onSuccessUpdateEmail"] = dict(draft.on_success_update)
+    return creation
+
+
+def _submission_result(email_id: str, payload: dict) -> SubmissionResult:
+    """The decided outcome of a submission: its durable handle, or the refusal
+    that stopped it."""
+    created = payload.get("created", {})
+    if isinstance(created, dict) and isinstance(created.get("s1"), dict):
+        submission_id = created["s1"].get("id")
+        if isinstance(submission_id, str) and submission_id:
+            return SubmissionResult(email_id, submission_id=submission_id)
+    errors = parse_set_errors(payload, "notCreated")
+    if "s1" in errors:
+        return SubmissionResult(email_id, error=errors["s1"])
+    raise JmapError(0, CODE_HTTP, "EmailSubmission/set answered without a result")
+
+
+def confirm_submission(
+    jmap: JmapSession,
+    submission_id: str,
+    cancelled: threading.Event | None = None,
+) -> dict | None:
+    """The stored submission object (sendAt, undoStatus, ...), or None when
+    the server no longer has it."""
+    raise_if_cancelled(cancelled)
+    [answer] = jmap.request(
+        [
+            JmapCall(
+                "EmailSubmission/get",
+                {
+                    "accountId": jmap.account_id,
+                    "ids": [submission_id],
+                    "properties": ["id", "emailId", "sendAt", "undoStatus"],
+                },
+            )
+        ],
+        cancelled,
+    )
+    payload = result_or_raise(answer)
+    for item in _response_list(payload, "list"):
+        if isinstance(item, dict) and item.get("id") == submission_id:
+            return item
+    return None
+
+
+def was_submitted(email_item: dict, sent_mailbox_id: str) -> bool:
+    """Whether a fetched email sits in the sent mailbox -- the server files it
+    there (or destroys the draft) once a submission goes through."""
+    mailboxes = email_item.get("mailboxIds")
+    return isinstance(mailboxes, dict) and sent_mailbox_id in mailboxes
+
+
+def resolve_uncertain_submission(
+    jmap: JmapSession,
+    email_id: str,
+    sent_mailbox_id: str,
+    cancelled: threading.Event | None = None,
+) -> bool | None:
+    """Settle an uncertain submission without sending anything: True when the
+    message reached the sent mailbox, False when it is still only a draft
+    (safe to retry on the user's say-so), None when the draft is gone and
+    nobody can tell -- surface that, don't resubmit."""
+    found, _missing = fetch_emails(
+        jmap, [email_id], cancelled, properties=_PLACEMENT_PROPERTIES
+    )
+    if not found:
+        return None
+    return was_submitted(found[0], sent_mailbox_id)
+
+
+def _changed_ids(payload: dict, key: str) -> list[str]:
+    """The bare ids under a /changes created/updated/destroyed key."""
+    return [
+        email_id
+        for email_id in _response_list(payload, key)
+        if isinstance(email_id, str)
+    ]
+
+
+def _apply_set(
+    jmap: JmapSession,
+    changes: dict,
+    if_in_state: str | None,
+    cancelled: threading.Event | None,
+    merged: EmailSetResult,
+) -> None:
+    """One Email/set call, merging what it applied into the running result.
+    The merged lists mutate in place across chunks of one logical change."""
+    raise_if_cancelled(cancelled)
+    arguments = {"accountId": jmap.account_id, **changes}
+    if if_in_state is not None:
+        arguments["ifInState"] = if_in_state
+    [answer] = jmap.request([JmapCall("Email/set", arguments)], cancelled)
+    payload = result_or_raise(answer)
+    created = payload.get("created", {})
+    if isinstance(created, dict):
+        merged.created.update(
+            {key: value for key, value in created.items() if isinstance(value, dict)}
+        )
+    for key, collected in (
+        ("updated", merged.updated),
+        ("destroyed", merged.destroyed),
+    ):
+        collected.extend(_changed_ids(payload, key) if key in payload else [])
+    for key in ("notCreated", "notUpdated", "notDestroyed"):
+        if key in payload:
+            merged.errors.update(parse_set_errors(payload, key))
+
+
+def _escape_segment(value: str) -> str:
+    """Escape one JSON-pointer segment (RFC 6901): mailbox ids are opaque and
+    may carry characters the patch syntax would otherwise read."""
+    return value.replace("~", "~0").replace("/", "~1")

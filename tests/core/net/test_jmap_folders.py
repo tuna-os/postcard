@@ -1,8 +1,18 @@
 import pytest
 
 from postcard.core.models.folder import FolderRole
-from postcard.core.net.jmap_folders import build_tree, list_mailboxes
-from postcard.core.net.jmap_session import JmapAnswer, JmapError
+from postcard.core.net.jmap_folders import (
+    build_tree,
+    current_mailbox_state,
+    list_mailboxes,
+    mailbox_changes,
+)
+from postcard.core.net.jmap_session import (
+    CODE_HTTP,
+    JmapAnswer,
+    JmapError,
+    needs_full_sync,
+)
 
 
 def mailbox(id, name, role=None, parent=None, **counts):
@@ -134,3 +144,110 @@ def test_a_method_error_reaches_the_caller_typed():
         list_mailboxes(jmap)  # type: ignore[arg-type]
 
     assert raised.value.code == "accountNotFound"
+
+
+def changes_answer(created, updated, destroyed, state, has_more=False):
+    return JmapAnswer(
+        "Mailbox/changes",
+        {
+            "created": created,
+            "updated": updated,
+            "destroyed": destroyed,
+            "newState": state,
+            "hasMoreChanges": has_more,
+        },
+        "0",
+    )
+
+
+def test_current_mailbox_state_reads_the_state_alone():
+    jmap = FakeJmap(JmapAnswer("Mailbox/get", {"list": [], "state": "b9"}, "0"))
+
+    assert current_mailbox_state(jmap) == "b9"  # type: ignore[arg-type]
+    [[call]] = jmap.calls
+    assert call.arguments["ids"] == []
+
+
+def test_current_mailbox_state_without_a_state_is_refused():
+    jmap = FakeJmap(JmapAnswer("Mailbox/get", {"list": []}, "0"))
+
+    with pytest.raises(JmapError) as raised:
+        current_mailbox_state(jmap)  # type: ignore[arg-type]
+
+    assert raised.value.code == CODE_HTTP
+
+
+def test_mailbox_changes_fetch_changed_and_report_destroyed():
+    jmap = FakeJmap(
+        changes_answer(["m-new"], ["m-inbox"], ["m-old"], "b2"),
+        mailboxes_answer(
+            [
+                mailbox("m-new", "Neu", None, None, unread=1, total=1),
+                mailbox("m-inbox", "Posteingang", "inbox", None, unread=4),
+            ]
+        ),
+    )
+
+    delta = mailbox_changes(jmap, "b1")  # type: ignore[arg-type]
+
+    assert [(m.id, m.parent_id) for m in delta.changed] == [
+        ("m-new", ""),
+        ("m-inbox", ""),
+    ]
+    assert delta.changed[1].role is FolderRole.INBOX
+    assert delta.changed[1].unread == 4
+    assert delta.destroyed_ids == ["m-old"]
+    assert delta.new_state == "b2"
+    [[changes], [refresh]] = jmap.calls
+    assert changes.arguments["sinceState"] == "b1"
+    assert refresh.arguments["ids"] == ["m-new", "m-inbox"]
+
+
+def test_mailbox_changes_follow_has_more_changes():
+    jmap = FakeJmap(
+        changes_answer(["m-a"], [], [], "b2", has_more=True),
+        mailboxes_answer([mailbox("m-a", "A")]),
+        changes_answer([], [], ["m-old"], "b3"),
+    )
+
+    delta = mailbox_changes(jmap, "b1")  # type: ignore[arg-type]
+
+    assert [m.id for m in delta.changed] == ["m-a"]
+    assert delta.destroyed_ids == ["m-old"]
+    assert delta.new_state == "b3"
+
+
+def test_a_changed_mailbox_keeps_its_parent_from_itself():
+    jmap = FakeJmap(
+        changes_answer([], ["m-2025"], [], "b2"),
+        mailboxes_answer([mailbox("m-2025", "2025", None, "m-receipts", total=4)]),
+    )
+
+    delta = mailbox_changes(jmap, "b1")  # type: ignore[arg-type]
+
+    assert [(m.id, m.parent_id) for m in delta.changed] == [("m-2025", "m-receipts")]
+
+
+def test_an_expired_mailbox_state_raises_for_a_full_list():
+    jmap = FakeJmap(
+        JmapAnswer(
+            "error",
+            {"type": "cannotCalculateChanges", "description": "old"},
+            "0",
+        )
+    )
+
+    with pytest.raises(JmapError) as raised:
+        mailbox_changes(jmap, "b-old")  # type: ignore[arg-type]
+
+    assert needs_full_sync(raised.value) is True
+
+
+def test_a_destroyed_only_pass_fetches_nothing():
+    jmap = FakeJmap(changes_answer([], [], ["m-old"], "b2"))
+
+    delta = mailbox_changes(jmap, "b1")  # type: ignore[arg-type]
+
+    assert delta.changed == []
+    assert delta.destroyed_ids == ["m-old"]
+    assert len(jmap.calls) == 1
