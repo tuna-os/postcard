@@ -17,7 +17,11 @@ import pytest
 # helper module imports by its bare name.
 from harness import require_env, require_helper
 
-from postcard.core.net.proton_session import MECHANISM_PROTON, login
+from postcard.core.net.proton_session import (
+    MECHANISM_PROTON,
+    ProtonError,
+    login,
+)
 
 pytestmark = pytest.mark.live
 
@@ -27,8 +31,13 @@ def test_login_returns_a_resumable_session_without_the_password():
     email = require_env("POSTCARD_PROTON_EMAIL")
     password = require_env("POSTCARD_PROTON_PASSWORD")
     totp = os.environ.get("POSTCARD_PROTON_TOTP")
-    with patch("shutil.which", return_value=binary):
-        credential = login(email, password, totp)
+    try:
+        with patch("shutil.which", return_value=binary):
+            credential = login(email, password, totp)
+    except ProtonError as error:
+        # The daily unblock check reads this line: the fixed-vocabulary code
+        # says whether the server refused, the TOTP failed, or the helper did.
+        pytest.fail(f"Proton login failed: {error.code}")
     assert credential.mechanism == MECHANISM_PROTON
     assert password not in credential.secret
     session = json.loads(credential.secret)
