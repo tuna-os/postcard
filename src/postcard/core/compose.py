@@ -10,7 +10,6 @@ from urllib.parse import unquote
 
 from .mime.message_parser import parse_message
 from .models.attachment import Attachment
-from .threader import NO_SUBJECT
 
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 _BLOCK_TAGS = {"p", "div", "br", "li", "tr", "blockquote", "pre"} | _HEADINGS
@@ -258,17 +257,17 @@ def reopen_draft(raw: bytes, envelope: Envelope | None) -> ReopenedDraft:
 
     To/Cc come from the message's own headers, which keep display names; Bcc
     comes only from the stored envelope, never from the MIME -- which must not
-    name it, so parsing it there would find nothing. A draft saved with no
-    subject reads back as "", not the "(no subject)" the drafts list shows.
+    name it, so parsing it there would find nothing. The subject reads back
+    verbatim: the saved MIME carries the row's own text, while the "(no
+    subject)" the drafts list shows lives only on the database row.
     """
     parsed = parse_message(raw)
-    subject = "" if parsed.subject.lower() == NO_SUBJECT else parsed.subject
     bcc = ", ".join(envelope["bcc"]) if envelope is not None else ""
     return ReopenedDraft(
         to=", ".join(parsed.to),
         cc=", ".join(parsed.cc),
         bcc=bcc,
-        subject=subject,
+        subject=parsed.subject,
         body_html=parsed.html_body or to_html(parsed.text_body or ""),
         attachments=tuple(parsed.attachments),
     )

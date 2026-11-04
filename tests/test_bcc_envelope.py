@@ -186,7 +186,7 @@ def _saved_draft(database, account_id, draft):
         "ada@example.com",
         _split(draft.to),
         _split(draft.cc),
-        draft.subject or NO_SUBJECT,
+        draft.subject,
         draft.body_html,
         list(draft.attachments),
     )
@@ -389,13 +389,26 @@ def test_a_draft_round_trip_restores_every_field_including_bcc(stored):
 
 def test_a_draft_without_a_subject_reopens_with_a_blank_one(stored):
     database, account = stored
-    _mail, raw, _envelope = _saved_draft(database, account.id, compose.ReopenedDraft())
+    mail, raw, _envelope = _saved_draft(database, account.id, compose.ReopenedDraft())
 
-    assert _headers(raw)["Subject"] == NO_SUBJECT
+    assert not _headers(raw)["Subject"]
 
-    restored = compose.reopen_draft(raw, database.draft_envelope(_mail.id))
+    restored = compose.reopen_draft(raw, database.draft_envelope(mail.id))
 
     assert restored.subject == ""
+
+
+def test_a_literal_no_subject_survives_the_round_trip(stored):
+    # The drafts list shows "(no subject)" for a blank row, but the MIME
+    # carries the row's own text -- so a subject the user typed must read
+    # back verbatim, never blanked as a placeholder.
+    database, account = stored
+    draft = compose.ReopenedDraft(subject=NO_SUBJECT)
+    mail, raw, _envelope = _saved_draft(database, account.id, draft)
+
+    restored = compose.reopen_draft(raw, database.draft_envelope(mail.id))
+
+    assert restored.subject == NO_SUBJECT
 
 
 def test_a_legacy_draft_without_an_envelope_reopens_without_bcc(stored):
