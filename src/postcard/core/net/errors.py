@@ -196,4 +196,10 @@ def _classify_tuta(exc: TutaError) -> tuple[bool, str]:  # noqa: PLR0911, C901
         return False, _(
             "This operation is not supported by the experimental Tuta backend yet."
         )
+    if exc.code == "send_uncertain":
+        # Never "try again": the mail may have gone out, and a retry could
+        # deliver it twice. A human checks Sent first.
+        return False, _(
+            "The message may have been sent. Check Sent before trying again."
+        )
     return False, _("The experimental Tuta operation failed. Try again later.")

@@ -4,6 +4,11 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
+use crypto_primitives::{
+    aes::{Aes256Key, InitializationVector},
+    key::GenericAesKey,
+    randomizer_facade::RandomizerFacade,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -19,25 +24,62 @@ use tutasdk::{
         file_client::{FileClient, FileClientError},
         rest_client::RestClient,
     },
+    blobs::blob_facade::FileData,
     crypto::sha256,
-    entities::generated::{
-        sys::CloseSessionServicePost,
-        tutanota::{Mail, MailSet, MailSetEntry},
+    entities::{
+        entity_facade::list_element_id,
+        generated::{
+            sys::{CloseSessionServicePost, PublicKeyGetIn},
+            tutanota::{
+                AttachmentKeyData, DraftAttachment, DraftCreateData, DraftData, DraftRecipient,
+                EncryptedMailAddress, Mail, MailSet, MailSetEntry, NewDraftAttachment,
+                SendDraftData, SendDraftParameters, TutanotaFile,
+            },
+        },
+        Entity,
     },
     login::{CredentialType, Credentials, LoginError},
     net::native_rest_client::NativeRestClient,
     rest_error::HttpError,
-    services::{generated::sys::CloseSessionService, ExtraServiceParams},
-    tutanota_constants::SecondFactorType,
+    services::{
+        generated::{
+            sys::{CloseSessionService, PublicKeyService},
+            tutanota::{DraftService, SendDraftService},
+        },
+        ExtraServiceParams,
+    },
+    tutanota_constants::{ArchiveDataType, PublicKeyIdentifierType, SecondFactorType},
     util::BASE64_EXT,
     ApiCallError, CustomId, GeneratedId, IdTupleCustom, IdTupleGenerated, ListLoadDirection,
     LoggedInSdk, Sdk,
 };
 
 const VERSION: u32 = 1;
-const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
+// Attachments ride the same stdin pipe as the request (base64), so the cap
+// covers a large mail, not just a JSON envelope. 32 MiB bounds memory while
+// leaving headroom over the blob service's own per-file limits.
+const MAX_REQUEST_BYTES: u64 = 32 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const TUTA_URL: &str = "https://app.tuta.com";
+// The server rejects larger mail-mutation batches with Bad Request; both the
+// SDK and the bridge extensions chunk at this size.
+const MAIL_BATCH_LIMIT: usize = 50;
+// Mirrors TS UNCOMPRESSED_MAX_SIZE: the official client refuses to create or
+// update a draft past this body size.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+// Drafts folder type, per the role table below.
+const DRAFTS_FOLDER_TYPE: i64 = 6;
+// A new conversation, not a reply or forward: server-side conversation
+// linking for replies needs the parent's conversation id, which Postcard only
+// knows as an SMTP Message-ID, so every send starts conversation type NEW.
+// Local threading still works through the In-Reply-To/References headers the
+// caller filed with its own copy.
+const CONVERSATION_NEW: i64 = 0;
+const METHOD_NONE: i64 = 0;
+// The notification language on the send call. Only the server's notification
+// mails (external password delivery, which this helper refuses to compose)
+// read it; an ordinary send delivers as a normal mail.
+const SEND_LANGUAGE: &str = "en";
 
 type Result<T> = std::result::Result<T, &'static str>;
 
@@ -130,9 +172,48 @@ enum Operation {
         ids: Vec<String>,
         destination: String,
     },
+    Send {
+        session: Session,
+        sender: String,
+        sender_name: String,
+        to: Vec<SendRecipient>,
+        cc: Vec<SendRecipient>,
+        bcc: Vec<SendRecipient>,
+        reply_tos: Vec<SendRecipient>,
+        subject: String,
+        body_html: String,
+        delivery: Delivery,
+        ordinary_confirmed: bool,
+        attachments: Vec<SendAttachment>,
+    },
     Revoke {
         session: Session,
     },
+}
+
+/// Which delivery the caller chose. There is no default: ordinary delivery
+/// additionally requires `ordinary_confirmed`, so it can never be selected by
+/// omitting a field.
+#[derive(Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+enum Delivery {
+    Secure,
+    Ordinary,
+}
+
+#[derive(Deserialize)]
+struct SendRecipient {
+    name: String,
+    address: String,
+}
+
+#[derive(Deserialize)]
+struct SendAttachment {
+    name: String,
+    mime_type: String,
+    cid: Option<String>,
+    /// Standard-base64 file bytes.
+    data: String,
 }
 #[derive(Deserialize)]
 struct Request {
@@ -247,6 +328,90 @@ fn server_error(error: HttpError) -> &'static str {
 
 async fn resume(sdk: &Sdk, session: Session) -> Result<Arc<LoggedInSdk>> {
     sdk.login(session.credentials()).await.map_err(resume_error)
+}
+
+/// Whether an address is shaped like one. Deliberately loose -- the server is
+/// authoritative and rejects what is truly undeliverable -- so a strict check
+/// here can only wrongly refuse mail. Anything without exactly one @, an
+/// empty side, or whitespace/control characters is not an address at all.
+fn valid_address(address: &str) -> bool {
+    let mut parts = address.split('@');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(local), Some(domain), None) => {
+            !local.is_empty()
+                && !domain.is_empty()
+                && !address.chars().any(|c| c.is_whitespace() || c.is_control())
+        }
+        _ => false,
+    }
+}
+
+fn normalise_mime(mime_type: &str) -> (&str, &str) {
+    match mime_type.split_once('/') {
+        Some((main, sub)) if !main.is_empty() && !sub.is_empty() => (main, sub),
+        _ => ("application", "octet-stream"),
+    }
+}
+
+/// Per-id outcomes for a mutation batch, in input order: every id up to the
+/// first failure applied, the failed id carries its code, and the rest were
+/// never attempted. A chunk is one service call, so a failed chunk reports
+/// its head and the tail stays unknown -- all three mutations are idempotent,
+/// and the next sync reconciles whatever the server did apply.
+fn outcomes(ids: &[String], applied: usize, code: Option<&'static str>) -> Value {
+    let rows: Vec<Value> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let outcome = if index < applied {
+                None
+            } else if index == applied {
+                code
+            } else {
+                Some("not_attempted")
+            };
+            json!({"id": id, "code": outcome})
+        })
+        .collect();
+    json!({"outcomes": rows})
+}
+
+/// Which code a failed send-submit reports. A rejection the server decided
+/// before executing anything is definitive (`send_failed`): nothing went out
+/// and a retry is safe. Anything that may have executed -- transport loss,
+/// timeouts, server-side failures -- is `send_uncertain`: the mail may have
+/// gone out, and retrying may deliver it twice. Unknown failures stay
+/// uncertain; only a proven rejection is definitive.
+fn submit_error(error: ApiCallError) -> &'static str {
+    match error {
+        ApiCallError::RestClient { .. } => "send_uncertain",
+        ApiCallError::InternalSdkError { .. } => "send_uncertain",
+        ApiCallError::ServerResponseError { source } => match source {
+            HttpError::BadRequestError
+            | HttpError::NotFoundError
+            | HttpError::MethodNotAllowedError
+            | HttpError::PreconditionFailedError(_)
+            | HttpError::InvalidDataError
+            | HttpError::LimitReachedError
+            | HttpError::InsufficientStorageError
+            | HttpError::ResourceError
+            | HttpError::PayloadTooLargeError
+            | HttpError::AccessBlockedError => "send_failed",
+            HttpError::InvalidSoftwareVersionError => "client_outdated",
+            HttpError::SessionExpiredError
+            | HttpError::NotAuthenticatedError
+            | HttpError::NotAuthorizedError
+            | HttpError::AccessExpiredError
+            | HttpError::AccessDeactivatedError => "session_revoked",
+            HttpError::RequestTimeoutError
+            | HttpError::ConnectionError
+            | HttpError::InternalServerError
+            | HttpError::BadGatewayError
+            | HttpError::ServiceUnavailableError { .. }
+            | HttpError::TooManyRequestsError { .. }
+            | HttpError::LockedError => "send_uncertain",
+        },
+    }
 }
 
 // Which code to report when none of the offered challenges is TOTP: name
@@ -446,6 +611,452 @@ async fn message(sdk: Arc<LoggedInSdk>, mail_id: String) -> Result<Value> {
         "reply_to": details.replyTos.iter().map(|a| json!({"name":a.name,"address":a.address})).collect::<Vec<_>>(),
         "attachments": rows}))
 }
+/// Best-effort recipient classification: (internal, external) counts, or None
+/// when a lookup failed for any reason other than "no key". Internal means
+/// the public-key service holds a key for the address, which is the
+/// authoritative half of the official client's rule (RecipientsModel also
+/// treats its own domains as internal without a lookup; the counts are
+/// informational only, so key presence alone is enough here). Ordinary
+/// delivery needs no keys, so a failed lookup never fails the send; the
+/// counts stay unknown.
+async fn classify_recipients(sdk: &LoggedInSdk, addresses: &[String]) -> Option<(usize, usize)> {
+    let mut internal = 0;
+    let mut external = 0;
+    for address in addresses {
+        let lookup = sdk
+            .get_service_executor()
+            .get::<PublicKeyService>(
+                PublicKeyGetIn {
+                    _format: 0,
+                    identifier: address.clone(),
+                    version: None,
+                    identifierType: PublicKeyIdentifierType::MailAddress as i64,
+                },
+                ExtraServiceParams::default(),
+            )
+            .await;
+        match lookup {
+            Ok(_) => internal += 1,
+            Err(ApiCallError::ServerResponseError {
+                source: HttpError::NotFoundError,
+            }) => external += 1,
+            Err(_) => return None,
+        }
+    }
+    Some((internal, external))
+}
+
+async fn drafts_folder_id(sdk: &LoggedInSdk) -> Option<IdTupleGenerated> {
+    let mailbox = sdk.mail_facade().load_user_mailbox().await.ok()?;
+    let folders: Vec<MailSet> = sdk
+        .mail_facade()
+        .get_crypto_entity_client()
+        .load_all(&mailbox.mailSets.mailSets, ListLoadDirection::ASC)
+        .await
+        .ok()?;
+    folders
+        .into_iter()
+        .find(|folder| folder.folderType == DRAFTS_FOLDER_TYPE)
+        .and_then(|folder| folder._id)
+}
+
+/// Remove a staged draft after a send that did not succeed. Best-effort: the
+/// outbox row stays the recovery point, so a leftover draft is clutter, not
+/// data loss. Safe after an uncertain submit too -- a consumed draft is gone
+/// from Drafts, and the server only deletes mails sitting in the given
+/// folder, so a sent mail is never touched.
+async fn cleanup_draft(sdk: Arc<LoggedInSdk>, draft: &IdTupleGenerated) {
+    if let Some(folder) = drafts_folder_id(&sdk).await {
+        let _ = MailExtensions::new(sdk)
+            .delete_mails(vec![draft.clone()], folder)
+            .await;
+    }
+}
+
+fn draft_recipients(recipients: &[SendRecipient]) -> Vec<DraftRecipient> {
+    recipients
+        .iter()
+        .map(|r| DraftRecipient {
+            _id: None,
+            name: r.name.clone(),
+            mailAddress: r.address.clone(),
+            _errors: Default::default(),
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draft_payload(
+    subject: String,
+    body_html: String,
+    sender: String,
+    sender_name: String,
+    to: Vec<DraftRecipient>,
+    cc: Vec<DraftRecipient>,
+    bcc: Vec<DraftRecipient>,
+    reply_tos: Vec<EncryptedMailAddress>,
+    added_attachments: Vec<DraftAttachment>,
+) -> DraftData {
+    DraftData {
+        _id: None,
+        subject,
+        // Mirrors the official client: the HTML goes in compressedBodyText
+        // and bodyText stays empty; the service encrypts both with the
+        // session key passed alongside the request.
+        bodyText: String::new(),
+        senderMailAddress: sender,
+        senderName: sender_name,
+        // Ordinary delivery only (see `send`): never flipped silently.
+        confidential: false,
+        method: METHOD_NONE,
+        compressedBodyText: Some(body_html),
+        toRecipients: to,
+        ccRecipients: cc,
+        bccRecipients: bcc,
+        addedAttachments: added_attachments,
+        removedAttachments: Vec::new(),
+        replyTos: reply_tos,
+        _errors: Default::default(),
+    }
+}
+
+fn ordinary_send_payload(
+    draft: IdTupleGenerated,
+    mail_session_key: Vec<u8>,
+    attachment_keys: Vec<AttachmentKeyData>,
+) -> SendDraftData {
+    SendDraftData {
+        _format: 0,
+        language: SEND_LANGUAGE.to_string(),
+        // Ordinary delivery hands the server the clear session keys, exactly
+        // as the official client does for a non-confidential draft. The
+        // bucket-encrypted variants stay empty: there is no bucket.
+        mailSessionKey: Some(mail_session_key.clone()),
+        bucketEncMailSessionKey: None,
+        senderNameUnencrypted: None,
+        // Plaintext stays off in both copies: the official client reads the
+        // account's sendPlaintextOnly property, but Postcard has no such
+        // setting and always composes HTML, so the flag matches the content
+        // rather than a server-side switch the user cannot see here.
+        plaintext: false,
+        calendarMethod: false,
+        sessionEncEncryptionAuthStatus: None,
+        sendAt: None,
+        allowUndo: false,
+        internalRecipientKeyData: Vec::new(),
+        secureExternalRecipientKeyData: Vec::new(),
+        attachmentKeyData: attachment_keys.clone(),
+        mail: draft.clone(),
+        symEncInternalRecipientKeyData: Vec::new(),
+        parameters: Some(SendDraftParameters {
+            _id: None,
+            language: SEND_LANGUAGE.to_string(),
+            mailSessionKey: Some(mail_session_key),
+            bucketEncMailSessionKey: None,
+            senderNameUnencrypted: None,
+            plaintext: false,
+            calendarMethod: false,
+            sessionEncEncryptionAuthStatus: None,
+            mail: draft,
+            internalRecipientKeyData: Vec::new(),
+            secureExternalRecipientKeyData: Vec::new(),
+            symEncInternalRecipientKeyData: Vec::new(),
+            attachmentKeyData: attachment_keys,
+        }),
+    }
+}
+
+struct StagedAttachment {
+    name: String,
+    mime_type: String,
+    cid: Option<String>,
+    bytes: Vec<u8>,
+    session_key: GenericAesKey,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send(
+    sdk: Arc<LoggedInSdk>,
+    sender: String,
+    sender_name: String,
+    to: Vec<SendRecipient>,
+    cc: Vec<SendRecipient>,
+    bcc: Vec<SendRecipient>,
+    reply_tos: Vec<SendRecipient>,
+    subject: String,
+    body_html: String,
+    delivery: Delivery,
+    ordinary_confirmed: bool,
+    attachments: Vec<SendAttachment>,
+) -> Result<Value> {
+    // Secure delivery is refused, not downgraded. Composing it needs the
+    // recipient-key path the pinned SDK keeps private: LoggedInSdk exposes
+    // neither AsymmetricCryptoFacade nor PublicKeyProvider, and the TutaCrypt
+    // sender-identity flow has no public entry point, so only legacy RSA
+    // recipients could be served -- and serving some Tuta recipients while
+    // failing others is a trap, not a feature. Follow-up: expose the facades
+    // (an SDK patch adding getters) or re-pin to an SDK with a send API, then
+    // implement recipient-key lookup + bucket encryption + key verification
+    // before enabling this arm.
+    if delivery == Delivery::Secure {
+        return Err("confidential_send_unsupported");
+    }
+    if !ordinary_confirmed {
+        return Err("ordinary_delivery_requires_consent");
+    }
+    let addresses: Vec<String> = to
+        .iter()
+        .chain(cc.iter())
+        .chain(bcc.iter())
+        .map(|r| r.address.clone())
+        .collect();
+    if addresses.is_empty()
+        || addresses.iter().any(|a| !valid_address(a))
+        || reply_tos.iter().any(|r| !valid_address(&r.address))
+    {
+        return Err("invalid_recipient");
+    }
+    if body_html.as_bytes().len() > MAX_BODY_BYTES {
+        return Err("body_too_large");
+    }
+    let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
+    let mut staged = Vec::with_capacity(attachments.len());
+    for attachment in &attachments {
+        let bytes = STANDARD
+            .decode(attachment.data.as_bytes())
+            .map_err(|_| "attachment_failed")?;
+        staged.push(StagedAttachment {
+            name: attachment.name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            cid: attachment.cid.clone(),
+            bytes,
+            session_key: GenericAesKey::Aes256(Aes256Key::generate(&randomizer)),
+        });
+    }
+    // The sender must be one of the account's own addresses (primary or
+    // alias); anything else is refused rather than sent from someone's name.
+    let mail_group_id = match sdk
+        .mail_facade()
+        .get_group_id_for_mail_address(&sender)
+        .await
+    {
+        Ok(group) => group,
+        Err(ApiCallError::ServerResponseError {
+            source: HttpError::NotFoundError,
+        }) => return Err("sender_unknown"),
+        Err(ApiCallError::RestClient { .. }) => return Err("transport_failed"),
+        Err(_) => return Err("send_failed"),
+    };
+    let mail_group_key = sdk
+        .get_current_sym_group_key(&mail_group_id)
+        .await
+        .map_err(|_| "send_failed")?;
+    let counts = classify_recipients(&sdk, &addresses).await;
+    let file_data: Vec<FileData> = staged
+        .iter()
+        .map(|s| FileData {
+            session_key: s.session_key.clone(),
+            data: &s.bytes,
+        })
+        .collect();
+    let reference_tokens = sdk
+        .blob_facade()
+        .encrypt_and_upload_multiple(
+            ArchiveDataType::Attachments,
+            &mail_group_id,
+            file_data.iter(),
+        )
+        .await
+        .map_err(|_| "attachment_failed")?;
+    if reference_tokens.len() != staged.len() {
+        return Err("attachment_failed");
+    }
+    let mut added_attachments = Vec::with_capacity(staged.len());
+    for (staged_attachment, tokens) in staged.iter().zip(reference_tokens) {
+        let owner_enc = mail_group_key.encrypt_key(
+            &staged_attachment.session_key,
+            InitializationVector::generate(&randomizer),
+        );
+        let encrypt_meta = |text: &[u8]| {
+            staged_attachment
+                .session_key
+                .encrypt_data(text, InitializationVector::generate(&randomizer))
+        };
+        let (main, sub) = normalise_mime(&staged_attachment.mime_type);
+        let enc_cid = staged_attachment
+            .cid
+            .as_ref()
+            .map(|cid| encrypt_meta(cid.as_bytes()))
+            .transpose()
+            .map_err(|_| "attachment_failed")?;
+        added_attachments.push(DraftAttachment {
+            _id: None,
+            ownerEncFileSessionKey: owner_enc.object,
+            ownerKeyVersion: i64::try_from(owner_enc.version).map_err(|_| "send_failed")?,
+            newFile: Some(NewDraftAttachment {
+                _id: None,
+                encFileName: encrypt_meta(staged_attachment.name.as_bytes())
+                    .map_err(|_| "attachment_failed")?,
+                encMimeType: encrypt_meta(format!("{main}/{sub}").as_bytes())
+                    .map_err(|_| "attachment_failed")?,
+                encCid: enc_cid,
+                referenceTokens: tokens,
+            }),
+            existingFile: None,
+        });
+    }
+    let mail_session_key = GenericAesKey::Aes256(Aes256Key::generate(&randomizer));
+    let owner_enc = mail_group_key.encrypt_key(
+        &mail_session_key,
+        InitializationVector::generate(&randomizer),
+    );
+    let created = sdk
+        .get_service_executor()
+        .post::<DraftService>(
+            DraftCreateData {
+                _format: 0,
+                previousMessageId: None,
+                conversationType: CONVERSATION_NEW,
+                ownerEncSessionKey: owner_enc.object,
+                ownerKeyVersion: i64::try_from(owner_enc.version).map_err(|_| "send_failed")?,
+                draftData: draft_payload(
+                    subject,
+                    body_html,
+                    sender,
+                    sender_name,
+                    draft_recipients(&to),
+                    draft_recipients(&cc),
+                    draft_recipients(&bcc),
+                    reply_tos
+                        .iter()
+                        .map(|r| EncryptedMailAddress {
+                            _id: None,
+                            name: r.name.clone(),
+                            address: r.address.clone(),
+                            _errors: Default::default(),
+                        })
+                        .collect(),
+                    added_attachments,
+                ),
+                _errors: Default::default(),
+            },
+            ExtraServiceParams {
+                session_key: Some(mail_session_key.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|_| "send_failed")?;
+    let draft = created.draft;
+    // From here on every failure attempts to remove the staged draft, so a
+    // failed send leaves no orphan behind. The outbox row stays the recovery
+    // point either way.
+    let mail: Mail = match sdk
+        .mail_facade()
+        .get_crypto_entity_client()
+        .load(&draft)
+        .await
+    {
+        Ok(mail) => mail,
+        Err(_) => {
+            cleanup_draft(sdk.clone(), &draft).await;
+            return Err("send_failed");
+        }
+    };
+    let attachment_keys = match file_session_keys(&sdk, &mail).await {
+        Ok(keys) => keys,
+        Err(_) => {
+            cleanup_draft(sdk.clone(), &draft).await;
+            return Err("send_failed");
+        }
+    };
+    let reply = match sdk
+        .get_service_executor()
+        .post::<SendDraftService>(
+            ordinary_send_payload(
+                draft.clone(),
+                mail_session_key.as_bytes().to_vec(),
+                attachment_keys,
+            ),
+            ExtraServiceParams::default(),
+        )
+        .await
+    {
+        Ok(reply) => reply,
+        Err(error) => {
+            let code = submit_error(error);
+            cleanup_draft(sdk.clone(), &draft).await;
+            return Err(code);
+        }
+    };
+    Ok(json!({
+        "message_id": reply.messageId,
+        "sent_date_ms": reply.sentDate.as_millis(),
+        "sent_mail": id(&reply.sentMail),
+        "internal_recipients": counts.map(|(internal, _)| internal),
+        "external_recipients": counts.map(|(_, external)| external),
+    }))
+}
+
+/// Each attachment file's session key, resolved from the server like the
+/// official client does -- never by assuming the server lists the files in
+/// upload order. A mismatched key would corrupt the attachment.
+async fn file_session_keys(
+    sdk: &LoggedInSdk,
+    mail: &Mail,
+) -> std::result::Result<Vec<AttachmentKeyData>, ()> {
+    if mail.attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let type_ref = TutanotaFile::type_ref();
+    let client = sdk.get_entity_client();
+    let model = client.resolve_server_type_ref(&type_ref).map_err(|_| ())?;
+    let mut lists: Vec<(GeneratedId, Vec<GeneratedId>)> = Vec::new();
+    for file_id in &mail.attachments {
+        match lists.iter_mut().find(|(list, _)| *list == file_id.list_id) {
+            Some((_, elements)) if elements.contains(&file_id.element_id) => return Err(()),
+            Some((_, elements)) => elements.push(file_id.element_id.clone()),
+            None => lists.push((file_id.list_id.clone(), vec![file_id.element_id.clone()])),
+        }
+    }
+    let crypto = sdk
+        .mail_facade()
+        .get_crypto_entity_client()
+        .get_crypto_facade()
+        .clone();
+    let mut keys = HashMap::new();
+    for (list, elements) in &lists {
+        let loaded = client
+            .load_multiple(&type_ref, list, elements)
+            .await
+            .map_err(|_| ())?;
+        for parsed in loaded {
+            let file_id = list_element_id(&model, &parsed).ok_or(())?;
+            if file_id.list_id != *list || keys.contains_key(&id(&file_id)) {
+                return Err(());
+            }
+            let resolved = crypto
+                .resolve_session_key(&parsed, &model)
+                .await
+                .map_err(|_| ())?
+                .ok_or(())?;
+            keys.insert(id(&file_id), resolved.session_key);
+        }
+    }
+    mail.attachments
+        .iter()
+        .map(|file_id| {
+            keys.remove(&id(file_id)).map(|key| AttachmentKeyData {
+                _id: None,
+                bucketEncFileSessionKey: None,
+                fileSessionKey: Some(key.as_bytes().to_vec()),
+                file: file_id.clone(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(())
+}
+
 async fn dispatch(request: Request) -> Result<Value> {
     if request.version != VERSION {
         return Err("unsupported_version");
@@ -471,31 +1082,79 @@ async fn dispatch(request: Request) -> Result<Value> {
             ids,
             is_read,
         } => {
-            let ids = ids.iter().map(|s| tuple(s)).collect::<Result<Vec<_>>>()?;
-            resume(&sdk, session)
-                .await?
-                .mail_facade()
-                .set_unread_status_for_mails(ids, !is_read)
-                .await
-                .map_err(|_| "request_failed")?;
-            Ok(json!({}))
+            if ids.len() > MAIL_BATCH_LIMIT {
+                return Err("invalid_batch");
+            }
+            let parsed = ids.iter().map(|s| tuple(s)).collect::<Result<Vec<_>>>()?;
+            let unread = !is_read;
+            let logged_in = resume(&sdk, session).await?;
+            let mut applied = 0;
+            for chunk in parsed.chunks(MAIL_BATCH_LIMIT) {
+                if logged_in
+                    .mail_facade()
+                    .set_unread_status_for_mails(chunk.to_vec(), unread)
+                    .await
+                    .is_err()
+                {
+                    return Ok(outcomes(&ids, applied, Some("request_failed")));
+                }
+                applied += chunk.len();
+            }
+            Ok(outcomes(&ids, applied, None))
         }
         Operation::Move {
             session,
             ids,
             destination,
         } => {
-            let ids = ids.iter().map(|s| tuple(s)).collect::<Result<Vec<_>>>()?;
-            // One mail per call so a failed move never hides a successful prefix.
-            if ids.len() != 1 {
-                return Err("invalid_move_batch");
+            if ids.len() > MAIL_BATCH_LIMIT {
+                return Err("invalid_batch");
             }
+            let parsed = ids.iter().map(|s| tuple(s)).collect::<Result<Vec<_>>>()?;
             let destination = tuple(&destination)?;
-            MailExtensions::new(resume(&sdk, session).await?)
-                .move_mails(ids, destination)
-                .await
-                .map_err(|_| "request_failed")?;
-            Ok(json!({}))
+            let logged_in = resume(&sdk, session).await?;
+            let mut applied = 0;
+            for chunk in parsed.chunks(MAIL_BATCH_LIMIT) {
+                if MailExtensions::new(logged_in.clone())
+                    .move_mails(chunk.to_vec(), destination.clone())
+                    .await
+                    .is_err()
+                {
+                    return Ok(outcomes(&ids, applied, Some("request_failed")));
+                }
+                applied += chunk.len();
+            }
+            Ok(outcomes(&ids, applied, None))
+        }
+        Operation::Send {
+            session,
+            sender,
+            sender_name,
+            to,
+            cc,
+            bcc,
+            reply_tos,
+            subject,
+            body_html,
+            delivery,
+            ordinary_confirmed,
+            attachments,
+        } => {
+            send(
+                resume(&sdk, session).await?,
+                sender,
+                sender_name,
+                to,
+                cc,
+                bcc,
+                reply_tos,
+                subject,
+                body_html,
+                delivery,
+                ordinary_confirmed,
+                attachments,
+            )
+            .await
         }
         Operation::Revoke { session } => revoke(&sdk, session).await,
     }
@@ -512,9 +1171,17 @@ async fn main() {
     {
         Ok(_) if input.len() <= MAX_REQUEST_BYTES as usize => {
             match serde_json::from_slice::<Request>(&input) {
-                Ok(request) => tokio::time::timeout(REQUEST_TIMEOUT, dispatch(request))
-                    .await
-                    .unwrap_or(Err("timeout")),
+                Ok(request) => {
+                    // A send that overruns the operation timeout may have
+                    // submitted: report uncertainty, never a plain timeout
+                    // the caller would read as "nothing happened".
+                    let is_send = matches!(request.operation, Operation::Send { .. });
+                    match tokio::time::timeout(REQUEST_TIMEOUT, dispatch(request)).await {
+                        Ok(result) => result,
+                        Err(_) if is_send => Err("send_uncertain"),
+                        Err(_) => Err("timeout"),
+                    }
+                }
                 Err(_) => Err("invalid_request"),
             }
         }
@@ -644,7 +1311,166 @@ mod tests {
     }
     #[test]
     fn request_rejects_unrecognized_operations() {
-        assert!(serde_json::from_str::<Request>(r#"{"version":1,"op":"send"}"#).is_err());
+        assert!(serde_json::from_str::<Request>(r#"{"version":1,"op":"star"}"#).is_err());
+    }
+    #[test]
+    fn send_parses_its_delivery_choice() {
+        let request: Request = serde_json::from_str(
+            r#"{"version":1,"op":"send","session":{"login":"a@tuta.com","user_id":"u",
+            "access_token":"t","encrypted_passphrase_key":[]},
+            "sender":"a@tuta.com","sender_name":"A","to":[],"cc":[],"bcc":[],
+            "reply_tos":[],"subject":"s","body_html":"b","delivery":"ordinary",
+            "ordinary_confirmed":true,"attachments":[]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request.operation,
+            Operation::Send {
+                delivery: Delivery::Ordinary,
+                ordinary_confirmed: true,
+                ..
+            }
+        ));
+        assert!(serde_json::from_str::<Request>(
+            r#"{"version":1,"op":"send","session":{"login":"a@tuta.com","user_id":"u",
+            "access_token":"t","encrypted_passphrase_key":[]},
+            "sender":"a@tuta.com","sender_name":"A","to":[],"cc":[],"bcc":[],
+            "reply_tos":[],"subject":"s","body_html":"b","delivery":"whenever",
+            "ordinary_confirmed":true,"attachments":[]}"#
+        )
+        .is_err());
+    }
+    #[test]
+    fn address_validation_rejects_only_the_shapeless() {
+        for address in ["ada@tuta.com", "a+b@x.io", "Ada@Tuta.Com"] {
+            assert!(valid_address(address), "{address}");
+        }
+        for address in [
+            "",
+            "ada",
+            "@tuta.com",
+            "ada@",
+            "a@b@c",
+            "a d@x.io",
+            "a@x.io\n",
+            "\t@x.io",
+        ] {
+            assert!(!valid_address(address), "{address:?}");
+        }
+    }
+    #[test]
+    fn mime_fallback_matches_the_read_path() {
+        assert_eq!(normalise_mime("text/html"), ("text", "html"));
+        assert_eq!(normalise_mime("noslash"), ("application", "octet-stream"));
+        assert_eq!(normalise_mime("/html"), ("application", "octet-stream"));
+        assert_eq!(normalise_mime("text/"), ("application", "octet-stream"));
+    }
+    #[test]
+    fn batch_outcomes_report_the_successful_prefix() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let full = outcomes(&ids, 3, None);
+        assert_eq!(
+            full["outcomes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["code"].is_null())
+                .collect::<Vec<_>>(),
+            vec![true, true, true]
+        );
+        let partial = outcomes(&ids, 1, Some("request_failed"));
+        let codes: Vec<Value> = partial["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["code"].clone())
+            .collect();
+        assert!(codes[0].is_null());
+        assert_eq!(codes[1], json!("request_failed"));
+        assert_eq!(codes[2], json!("not_attempted"));
+        let empty = outcomes(&[], 0, None);
+        assert!(empty["outcomes"].as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn submit_failures_distinguish_rejection_from_uncertainty() {
+        let rejected = submit_error(ApiCallError::ServerResponseError {
+            source: HttpError::BadRequestError,
+        });
+        assert_eq!(rejected, "send_failed");
+        let blocked = submit_error(ApiCallError::ServerResponseError {
+            source: HttpError::AccessBlockedError,
+        });
+        assert_eq!(blocked, "send_failed");
+        let uncertain = submit_error(ApiCallError::ServerResponseError {
+            source: HttpError::InternalServerError,
+        });
+        assert_eq!(uncertain, "send_uncertain");
+        let transport = submit_error(ApiCallError::RestClient {
+            source: RestClientError::NetworkError,
+        });
+        assert_eq!(transport, "send_uncertain");
+        let outdated = submit_error(ApiCallError::ServerResponseError {
+            source: HttpError::InvalidSoftwareVersionError,
+        });
+        assert_eq!(outdated, "client_outdated");
+        let revoked = submit_error(ApiCallError::ServerResponseError {
+            source: HttpError::SessionExpiredError,
+        });
+        assert_eq!(revoked, "session_revoked");
+    }
+    #[test]
+    fn draft_payload_never_marks_ordinary_mail_confidential() {
+        let payload = draft_payload(
+            "subject".to_string(),
+            "<p>body</p>".to_string(),
+            "ada@tuta.com".to_string(),
+            "Ada".to_string(),
+            vec![DraftRecipient {
+                _id: None,
+                name: "Bo".to_string(),
+                mailAddress: "bo@example.com".to_string(),
+                _errors: Default::default(),
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!payload.confidential);
+        assert_eq!(payload.compressedBodyText.as_deref(), Some("<p>body</p>"));
+        assert_eq!(payload.bodyText, "");
+        assert_eq!(payload.method, METHOD_NONE);
+        assert_eq!(payload.toRecipients.len(), 1);
+    }
+    #[test]
+    fn ordinary_send_payload_carries_clear_keys_and_no_bucket() {
+        let draft = IdTupleGenerated::new(GeneratedId("list".into()), GeneratedId("mail".into()));
+        let payload = ordinary_send_payload(draft, vec![7; 32], Vec::new());
+        assert_eq!(payload.mailSessionKey, Some(vec![7; 32]));
+        assert!(payload.bucketEncMailSessionKey.is_none());
+        assert!(payload.internalRecipientKeyData.is_empty());
+        assert!(payload.secureExternalRecipientKeyData.is_empty());
+        assert!(payload.symEncInternalRecipientKeyData.is_empty());
+        assert!(!payload.plaintext);
+        let parameters = payload.parameters.unwrap();
+        assert_eq!(parameters.mailSessionKey, Some(vec![7; 32]));
+        assert_eq!(parameters.language, SEND_LANGUAGE);
+    }
+    #[test]
+    fn attachment_metadata_round_trips_through_the_sdk_cipher() {
+        // Offline proof that what the send path encrypts, the SDK's own
+        // decrypt path reads back: same functions the official client's
+        // format depends on.
+        let randomizer = RandomizerFacade::from_core(rand_core::OsRng);
+        let key = GenericAesKey::Aes256(Aes256Key::generate(&randomizer));
+        for text in ["résumé.pdf", "text/html", "part1"] {
+            let encrypted = key
+                .encrypt_data(text.as_bytes(), InitializationVector::generate(&randomizer))
+                .unwrap();
+            assert_eq!(key.decrypt_data(&encrypted).unwrap(), text.as_bytes());
+        }
+        let wrapped = key.encrypt_key(&key, InitializationVector::generate(&randomizer));
+        assert!(!wrapped.is_empty());
     }
     #[cfg(target_os = "linux")]
     #[test]
