@@ -99,6 +99,25 @@ def _quote_mailbox(name: str) -> str:
     return f'"{escaped}"'
 
 
+def _parse_appenduid(response: object) -> tuple[int, str] | None:
+    """The (UIDVALIDITY, UID) of an APPENDUID response code, or None.
+
+    The code reads "38505 3955": the validity the UID belongs to, then the UID
+    itself. Anything else -- no UIDPLUS, a mangled line -- means the copy went
+    in but unlinked, which is recorded as None rather than a failure.
+    """
+    values = response if isinstance(response, (list, tuple)) else [response]
+    text = " ".join(
+        value.decode("ascii", "replace") if isinstance(value, bytes) else str(value)
+        for value in values
+        if value is not None
+    )
+    match = re.search(r"\b(\d+)\s+(\d+)\b", text)
+    if match is None:
+        return None
+    return int(match.group(1)), match.group(2)
+
+
 def _unquote(token: str) -> str:
     """The inverse of _quote_mailbox: drop the quotes and backslash escapes."""
     if token.startswith('"') and token.endswith('"'):
@@ -321,17 +340,20 @@ class ImapSession:
         except imaplib.IMAP4.error as error:
             raise ImapError(f"IDLE failed: {error}") from error
 
-    def append(self, mailbox: str, raw: bytes) -> None:
+    def append(self, mailbox: str, raw: bytes) -> tuple[int, str] | None:
         """Upload a message into a mailbox, without selecting it first.
 
         Stored \\Seen: this is our own copy of something we just sent, and
-        arriving as unread mail would be wrong.
+        arriving as unread mail would be wrong. Returns the (UIDVALIDITY, UID)
+        the server assigned it under UIDPLUS, or None when the server sent no
+        APPENDUID -- the copy is filed either way, only the link back is lost.
         """
-        status, payload = self._require_imap().append(
-            _quote_mailbox(mailbox), FLAG_SEEN, None, raw
-        )
+        imap = self._require_imap()
+        status, payload = imap.append(_quote_mailbox(mailbox), FLAG_SEEN, None, raw)
         if status != STATUS_OK:
             raise ImapError(f"could not append to {mailbox}: {payload}")
+        _status, response = imap.response("APPENDUID")
+        return _parse_appenduid(response)
 
     def store_flags(self, uids: str, flags: str, should_add: bool) -> None:
         """Add or remove flags (e.g. "\\Seen") on a UID set: "7" or "7,9,20"."""
@@ -368,6 +390,26 @@ class ImapSession:
         if non_numeric:
             raise ImapError(f"search returned non-numeric UIDs: {non_numeric}")
         return uids
+
+    def search_message_id(self, message_id: str) -> set[str]:
+        """UIDs in the selected mailbox whose Message-ID header is `message_id`.
+
+        The redelivery check: a queued send claimed before proves nothing about
+        whether its mail left, so a retry looks for its own copy in Sent first.
+        """
+        try:
+            status, payload = self._require_imap().uid(
+                "SEARCH", "HEADER", "Message-ID", _quote_mailbox(message_id)
+            )
+        except imaplib.IMAP4.error as error:
+            raise ImapError(f"search failed: {error}") from error
+        if status != STATUS_OK:
+            raise ImapError(f"search failed: {payload}")
+        uids: set[str] = set()
+        for item in payload:
+            if isinstance(item, bytes):
+                uids.update(item.decode("ascii", "replace").split())
+        return {uid for uid in uids if uid.isdigit()}
 
     def move(self, uid: str, destination: str) -> str | None:
         """Move one message and return its destination UID when reported.

@@ -30,7 +30,7 @@ from .core.lifecycle import JobToken, Lifecycle
 from .core.models.account import Account
 from .core.models.attachment import Attachment
 from .core.net import errors
-from .core.store.database import Database
+from .core.store.database import Database, OutboxState, QueuedSend
 from .core.threader import NO_SUBJECT
 
 logger = logging.getLogger(__name__)
@@ -395,10 +395,14 @@ class PostcardComposerWindow(Adw.Window):
         body: str = "",
         cc: str = "",
         bcc: str = "",
+        in_reply_to: str = "",
+        references: str = "",
     ) -> None:
         super().__init__(application=app)
         self._db = db
         self._account = account
+        self._in_reply_to = in_reply_to
+        self._references = references
         # Its own generations, so closing a main window never strands a send;
         # account removal still reaches it through mail_sync's broadcast.
         self._lifecycle = Lifecycle()
@@ -836,6 +840,8 @@ class PostcardComposerWindow(Adw.Window):
             subject,
             self._body_html,
             self._attachments,
+            in_reply_to=self._in_reply_to,
+            references=self._references,
         )
         raw = msg.as_bytes()
 
@@ -863,6 +869,14 @@ class PostcardComposerWindow(Adw.Window):
             is_unread=False,
         )
         self._db.save_raw_message(row.id, raw)
+        self._db.queue_outbox_email(row.id, recipients)
+        job = mail_sync.claim_queued_send(self._db, row.id)
+        if job is None:
+            # A drain claimed it between the save and here; it owns the send
+            # now, so there is nothing left to do but go away.
+            self.emit("finished", "")
+            self.destroy()
+            return
 
         # The button stays lit, spinning, rather than greyed out like the rest.
         self._is_sending = True
@@ -874,7 +888,7 @@ class PostcardComposerWindow(Adw.Window):
         token = self._lifecycle.mint(self._account.id)
         thread = threading.Thread(
             target=self._send_worker,
-            args=(self._account, row.id, subject, recipients, raw, token),
+            args=(self._account, job, token),
             daemon=True,
         )
         thread.start()
@@ -883,10 +897,7 @@ class PostcardComposerWindow(Adw.Window):
     def _send_worker(
         self,
         account: Account,
-        email_id: int,
-        subject: str,
-        recipients: list[str],
-        raw: bytes,
+        job: QueuedSend,
         token: JobToken,
     ) -> None:
         credential = secrets.credential_for(account)
@@ -896,69 +907,90 @@ class PostcardComposerWindow(Adw.Window):
                 self._on_send_failed,
                 _("Could not sign in to this account."),
                 token,
+                job.email_id,
+                None,
             )
             return
 
         try:
-            mail_sync.send_message(account, credential, account.email, recipients, raw)
+            outcome = mail_sync.send_queued(account, credential, job)
         except Exception as error:
             logger.exception(
                 "could not send %r to %s via %s (account %s)",
-                subject,
-                ", ".join(recipients),
+                job.subject,
+                ", ".join(job.envelope or ()),
                 account.smtp_host,
                 account.email,
             )
             _is_auth_failure, message = errors.classify(error, account.smtp_host)
-            GLib.idle_add(self._on_send_failed, message, token)
+            GLib.idle_add(self._on_send_failed, message, token, job.email_id, error)
             return
-        GLib.idle_add(self._on_send_done, account, email_id, subject, raw, token)
+        GLib.idle_add(self._on_send_done, account, job, outcome, token)
 
     # Back on the main thread: safe to touch the database and widgets.
     def _on_send_done(
         self,
         account: Account,
-        email_id: int,
-        subject: str,
-        raw: bytes,
+        job: QueuedSend,
+        outcome: mail_sync.SendOutcome,
         token: JobToken,
     ) -> bool:
         # Past the account's removal there is no Sent folder to file under --
         # and with the rowid reused, the Outbox row id may name another
         # account's mail. The message itself went out, so just go away.
         if not self._lifecycle.is_live(token):
+            mail_sync.release_queued_send(job.email_id)
             if not self._is_destroyed:
                 self.destroy()
             return False
-        self._db.delete_email(email_id)
-        sent = mail_sync.sent_folder(self._db, account.id)
-        recipient, recipient_address = mail_sync.first_recipient(self.to_row.get_text())
-        row = self._db.save_email(
-            sent.id,
-            sender=account.email,
-            recipient=recipient,
-            recipient_address=recipient_address,
-            subject=subject,
-            preview=subject,
-            date=_now(),
-            is_unread=False,
+        mail_sync.release_queued_send(job.email_id)
+        recipient = mail_sync.first_recipient(self.to_row.get_text())
+        sent, validity_changed = mail_sync.file_sent_email(
+            self._db, account, job, outcome, recipient
         )
-        self._db.save_raw_message(row.id, raw)
-        self.emit("finished", "")
+        if validity_changed:
+            self._lifecycle.invalidate_folder(account.id, sent.name)
+        if outcome.file_error is not None:
+            _is_auth_failure, message = errors.classify(
+                outcome.file_error, account.imap_host
+            )
+            self.emit(
+                "finished",
+                _("Sent, but the copy couldn't be saved to Sent: {msg}.").format(
+                    msg=message
+                ),
+            )
+        else:
+            self.emit("finished", "")
         # destroy, not close: there is no draft to keep of a message sent.
         self.destroy()
         return False
 
-    def _on_send_failed(self, message: str, token: JobToken) -> bool:
+    def _on_send_failed(
+        self,
+        message: str,
+        token: JobToken,
+        email_id: int,
+        error: Exception | None,
+    ) -> bool:
         # Past the account's removal there is no Outbox left to have saved to,
         # so the usual message would be a lie told about another account's row.
         if not self._lifecycle.is_live(token):
+            mail_sync.release_queued_send(email_id)
             if not self._is_destroyed:
                 self.destroy()
             return False
-        self.emit(
-            "finished", _("Couldn't send: {msg}. Saved to Outbox.").format(msg=message)
+        mail_sync.release_queued_send(email_id)
+        state = mail_sync.fail_queued_send(
+            self._db, email_id, str(error) if error is not None else message
         )
+        if state is OutboxState.FAILED:
+            failure = _(
+                "Couldn't send after several tries: {msg}. Kept in the Outbox."
+            ).format(msg=message)
+        else:
+            failure = _("Couldn't send: {msg}. Saved to Outbox.").format(msg=message)
+        self.emit("finished", failure)
         self.destroy()
         return False
 
