@@ -14,6 +14,7 @@ src/postcard/microsoft_dialog.py
 src/postcard/online_accounts_dialog.py
 src/postcard/preferences_dialog.py
 src/postcard/tray.py
+src/postcard/tuta_dialog.py
 src/postcard/window.py
 src/ui/account-dialog.blp
 src/ui/accounts-dialog.blp
@@ -24,3 +25,4 @@ src/ui/microsoft-dialog.blp
 src/ui/online-accounts-dialog.blp
 src/ui/preferences-dialog.blp
 src/ui/shortcuts-dialog.blp
+src/ui/tuta-dialog.blp

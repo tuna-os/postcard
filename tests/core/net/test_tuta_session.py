@@ -10,6 +10,7 @@ from postcard.core.net.tuta_session import (
     TutaError,
     TutaSession,
     helper_transport,
+    is_valid_totp,
     login,
 )
 
@@ -149,6 +150,74 @@ def test_a_session_cannot_resume_a_shapeless_secret():
     with pytest.raises(TutaError) as caught:
         TutaSession(credential)
     assert caught.value.code == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    ("code", "is_valid"),
+    [
+        ("001234", True),
+        ("000000", True),
+        ("", False),
+        ("12345", False),
+        ("1234567", False),
+        ("12345a", False),
+        (" 12345", False),
+        # Non-ASCII numerals pass str.isdigit but the helper rejects them.
+        ("١٢٣٤٥٦", False),
+    ],
+)
+def test_totp_codes_are_six_ascii_digits(code, is_valid):
+    assert is_valid_totp(code) is is_valid
+
+
+def test_login_challenge_and_totp_retry_are_distinct_calls():
+    calls = []
+
+    def transport(request):
+        calls.append(request)
+        if request["totp"] is None:
+            return {"version": 1, "error": {"code": "second_factor_required"}}
+        return {"version": 1, "result": {"session": SESSION}}
+
+    with pytest.raises(TutaError) as challenged:
+        login(SESSION["login"], "fixture-password", transport=transport)
+    assert challenged.value.code == "second_factor_required"
+    credential = login(
+        SESSION["login"], "fixture-password", "001234", transport=transport
+    )
+    assert credential == CREDENTIAL
+    assert [call["totp"] for call in calls] == [None, "001234"]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "session_revoked",
+        "session_invalid",
+        "client_outdated",
+        "revoke_failed",
+        "unsupported_u2f",
+        "unsupported_webauthn",
+    ],
+)
+def test_resume_and_factor_taxonomy_survives_the_transport(code):
+    def transport(request):
+        return {"version": 1, "error": {"code": code}}
+
+    with pytest.raises(TutaError) as caught:
+        TutaSession(CREDENTIAL, transport).request("sync")
+    assert caught.value.code == code
+
+
+def test_revoke_sends_the_stored_session():
+    requests = []
+
+    def transport(request):
+        requests.append(request)
+        return {"version": 1, "result": {}}
+
+    TutaSession(CREDENTIAL, transport).request("revoke")
+    assert requests == [{"version": 1, "op": "revoke", "session": SESSION}]
 
 
 def test_compiled_helper_rejects_incompatible_protocol_without_network():

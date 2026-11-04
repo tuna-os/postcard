@@ -103,9 +103,12 @@ def test_a_changed_folder_is_not_a_password_problem():
 
 
 def test_tuta_sign_in_and_second_factor_failures_stay_distinct():
+    # A rejected password is an auth failure, like Proton's; an unclassified
+    # resume failure stays retryable.
+    assert is_auth_failure(TutaError("login_failed"))
+    assert not is_auth_failure(TutaError("resume_failed"))
     for code in ("login_failed", "resume_failed"):
-        is_auth, message = classify(TutaError(code), "h")
-        assert not is_auth
+        _is_auth, message = classify(TutaError(code), "h")
         assert code not in message
         assert message
     is_auth, message = classify(TutaError("unsupported_second_factor"), "h")
