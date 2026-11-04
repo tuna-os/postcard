@@ -43,7 +43,6 @@ _register_resources()
 
 import time
 
-from postcard.accounts_dialog import PostcardAccountsDialog
 from postcard.core.net import ms_login
 from postcard.core.net.ms_oauth import MsOAuthError, Tokens
 from postcard.core.store.database import Database
@@ -174,17 +173,6 @@ def test_sign_in_without_a_browser_never_starts_login(monkeypatch, tmp_path):
 
     assert dialog.dialog_stack.get_visible_child_name() == "form"
     assert db.accounts() == []
-    db.close()
-
-
-def test_the_entry_point_hides_until_an_app_is_registered(monkeypatch, tmp_path):
-    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
-
-    monkeypatch.setattr("postcard.core.net.ms_oauth.MS_CLIENT_ID", "")
-    assert not PostcardAccountsDialog(db).microsoft_button.get_visible()
-
-    monkeypatch.setattr("postcard.core.net.ms_oauth.MS_CLIENT_ID", "test-client")
-    assert PostcardAccountsDialog(db).microsoft_button.get_visible()
     db.close()
 
 

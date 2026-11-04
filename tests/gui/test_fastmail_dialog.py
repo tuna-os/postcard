@@ -43,7 +43,6 @@ _register_resources()
 
 import time
 
-from postcard.accounts_dialog import PostcardAccountsDialog
 from postcard.core.net import fastmail_login
 from postcard.core.net.fastmail_oauth import FastmailOAuthError, Tokens
 from postcard.core.store.database import Database
@@ -184,19 +183,6 @@ def test_sign_in_without_a_browser_never_starts_login(monkeypatch, tmp_path):
 
     assert dialog.dialog_stack.get_visible_child_name() == "form"
     assert db.accounts() == []
-    db.close()
-
-
-def test_the_entry_point_hides_until_a_client_is_registered(monkeypatch, tmp_path):
-    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
-
-    monkeypatch.setattr("postcard.core.net.fastmail_oauth.FASTMAIL_CLIENT_ID", "")
-    assert not PostcardAccountsDialog(db).fastmail_button.get_visible()
-
-    monkeypatch.setattr(
-        "postcard.core.net.fastmail_oauth.FASTMAIL_CLIENT_ID", "test-client"
-    )
-    assert PostcardAccountsDialog(db).fastmail_button.get_visible()
     db.close()
 
 

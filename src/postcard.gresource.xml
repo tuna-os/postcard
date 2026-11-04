@@ -10,6 +10,8 @@
     <file preprocess="xml-stripblanks">ui/microsoft-dialog.ui</file>
     <file preprocess="xml-stripblanks">ui/fastmail-dialog.ui</file>
     <file preprocess="xml-stripblanks">ui/tuta-dialog.ui</file>
+    <file preprocess="xml-stripblanks">ui/proton-dialog.ui</file>
+    <file preprocess="xml-stripblanks">ui/provider-dialog.ui</file>
     <file preprocess="xml-stripblanks">ui/composer-window.ui</file>
     <file preprocess="xml-stripblanks">ui/preferences-dialog.ui</file>
     <file>style.css</file>
@@ -19,5 +21,11 @@
     <!-- Not in Breeze, which KDE themes the sandbox with. -->
     <file preprocess="xml-stripblanks">icons/scalable/actions/view-list-bullet-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/view-list-ordered-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/providers/postcard-provider-google.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/providers/postcard-provider-microsoft.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/providers/postcard-provider-fastmail.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/providers/postcard-provider-proton.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/providers/postcard-provider-tuta.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/providers/postcard-provider-other.svg</file>
   </gresource>
 </gresources>

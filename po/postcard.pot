@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-04 16:33+0000\n"
+"POT-Creation-Date: 2026-11-04 22:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -20,7 +20,7 @@ msgstr ""
 
 #: data/in.gxanshu.postcard.desktop.in:3
 #: data/in.gxanshu.postcard.metainfo.xml.in:7 src/ui/main-window.blp:5
-#: src/ui/main-window.blp:123
+#: src/ui/main-window.blp:106
 msgid "Postcard"
 msgstr ""
 
@@ -212,7 +212,7 @@ msgstr ""
 msgid "The three-pane layout with folders, conversations, and reader"
 msgstr ""
 
-#: src/postcard/accounts_dialog.py:61
+#: src/postcard/accounts_dialog.py:44
 msgid "Remove Account"
 msgstr ""
 
@@ -226,7 +226,7 @@ msgstr ""
 
 #. Auth failures aren't worth a Retry button (same password); everything
 #. else is a transient connection problem the user can retry.
-#: src/postcard/application.py:121 src/postcard/window.py:3310
+#: src/postcard/application.py:121 src/postcard/window.py:3282
 msgid "Retry"
 msgstr ""
 
@@ -280,12 +280,12 @@ msgstr ""
 msgid "Insert Link"
 msgstr ""
 
-#: src/postcard/composer_window.py:744 src/postcard/window.py:2628
+#: src/postcard/composer_window.py:744 src/postcard/window.py:2600
 #: src/ui/account-dialog.blp:17 src/ui/composer-window.blp:17
 #: src/ui/fastmail-dialog.blp:38 src/ui/fastmail-dialog.blp:70
 #: src/ui/microsoft-dialog.blp:38 src/ui/microsoft-dialog.blp:70
-#: src/ui/tuta-dialog.blp:42 src/ui/tuta-dialog.blp:74
-#: src/ui/tuta-dialog.blp:101
+#: src/ui/proton-dialog.blp:46 src/ui/proton-dialog.blp:78
+#: src/ui/tuta-dialog.blp:46 src/ui/tuta-dialog.blp:78
 msgid "Cancel"
 msgstr ""
 
@@ -301,13 +301,13 @@ msgstr ""
 msgid "Remove Attachment"
 msgstr ""
 
-#: src/postcard/composer_window.py:1008 src/postcard/window.py:1081
-#: src/postcard/window.py:1548 src/postcard/window.py:2434
-#: src/postcard/window.py:2729 src/postcard/window.py:3009
+#: src/postcard/composer_window.py:1008 src/postcard/window.py:1053
+#: src/postcard/window.py:1520 src/postcard/window.py:2406
+#: src/postcard/window.py:2701 src/postcard/window.py:2981
 msgid "Could not sign in to this account."
 msgstr ""
 
-#: src/postcard/composer_window.py:1059 src/postcard/window.py:2807
+#: src/postcard/composer_window.py:1059 src/postcard/window.py:2779
 #, python-brace-format
 msgid "Sent, but the copy couldn't be saved to Sent: {msg}."
 msgstr ""
@@ -328,7 +328,7 @@ msgstr ""
 msgid "Couldn't send: {msg}. Saved to Outbox."
 msgstr ""
 
-#: src/postcard/composer_window.py:1132 src/postcard/window.py:2864
+#: src/postcard/composer_window.py:1132 src/postcard/window.py:2836
 #, python-brace-format
 msgid ""
 "Sent to some recipients, but the server refused {addrs}. Kept in the Outbox."
@@ -509,8 +509,65 @@ msgstr ""
 msgid "The experimental Tuta operation failed. Try again later."
 msgstr ""
 
+#: src/postcard/core/providers/catalog.py:49
+msgid "Google"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:50
+msgid "Gmail, using GNOME Online Accounts"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:56 src/ui/microsoft-dialog.blp:5
+msgid "Microsoft 365"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:57
+msgid "Outlook, with a browser sign-in"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:61
+#: src/postcard/core/providers/catalog.py:70
+msgid "Not available in this build yet"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:65 src/ui/fastmail-dialog.blp:5
+msgid "Fastmail"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:66
+msgid "With a browser sign-in"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:74 src/ui/proton-dialog.blp:5
+msgid "Proton"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:75
+msgid "Proton Mail, with password and two-factor code"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:79
+msgid "Needs its sign-in helper, which is not shipped yet"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:83 src/ui/tuta-dialog.blp:5
+msgid "Tuta"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:84
+msgid "With password and two-factor code"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:90
+msgid "Other"
+msgstr ""
+
+#: src/postcard/core/providers/catalog.py:91
+msgid "Any IMAP account, set up by hand"
+msgstr ""
+
 #: src/postcard/fastmail_dialog.py:63 src/postcard/microsoft_dialog.py:63
-#: src/postcard/tuta_dialog.py:101
+#: src/postcard/proton_dialog.py:82 src/postcard/tuta_dialog.py:84
 msgid "This account is already added."
 msgstr ""
 
@@ -642,6 +699,18 @@ msgstr ""
 msgid "Could not change whether Postcard starts at login."
 msgstr ""
 
+#: src/postcard/proton_dialog.py:86 src/postcard/tuta_dialog.py:88
+msgid "Enter the six-digit code from your authenticator app."
+msgstr ""
+
+#: src/postcard/proton_dialog.py:164 src/postcard/tuta_dialog.py:166
+msgid "That code didn't work. It may have expired; enter the current one."
+msgstr ""
+
+#: src/postcard/provider_dialog.py:70
+msgid "Signs in through your browser"
+msgstr ""
+
 #: src/postcard/tray.py:110
 msgid "Open Postcard"
 msgstr ""
@@ -650,96 +719,92 @@ msgstr ""
 msgid "Compose"
 msgstr ""
 
-#: src/postcard/tray.py:112 src/ui/main-window.blp:149
+#: src/postcard/tray.py:112 src/ui/main-window.blp:132
 msgid "Refresh Inbox"
 msgstr ""
 
-#: src/postcard/tuta_dialog.py:192
-msgid "That code didn't work. It may have expired; enter the current one."
-msgstr ""
-
-#: src/postcard/window.py:124
+#: src/postcard/window.py:121
 #, python-brace-format
 msgid "Archived"
 msgid_plural "Archived {n} conversations"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:126
+#: src/postcard/window.py:123
 #, python-brace-format
 msgid "Unarchived"
 msgid_plural "Unarchived {n} conversations"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:127
+#: src/postcard/window.py:124
 #, python-brace-format
 msgid "Deleted"
 msgid_plural "Deleted {n} conversations"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:353
+#: src/postcard/window.py:341
 msgid "All Inboxes"
 msgstr ""
 
-#: src/postcard/window.py:1095
+#: src/postcard/window.py:1067
 #, python-brace-format
 msgid "Action failed: {msg}"
 msgstr ""
 
-#: src/postcard/window.py:1186 src/postcard/window.py:2289
-#: src/ui/main-window.blp:259
+#: src/postcard/window.py:1158 src/postcard/window.py:2261
+#: src/ui/main-window.blp:242
 msgid "Mark Read"
 msgstr ""
 
-#: src/postcard/window.py:1188 src/postcard/window.py:2292
+#: src/postcard/window.py:1160 src/postcard/window.py:2264
 msgid "Mark Unread"
 msgstr ""
 
-#: src/postcard/window.py:1190 src/postcard/window.py:2296
+#: src/postcard/window.py:1162 src/postcard/window.py:2268
 msgid "Unstar"
 msgstr ""
 
-#: src/postcard/window.py:1190 src/postcard/window.py:2299
-#: src/ui/main-window.blp:266
+#: src/postcard/window.py:1162 src/postcard/window.py:2271
+#: src/ui/main-window.blp:249
 msgid "Star"
 msgstr ""
 
-#: src/postcard/window.py:1197
+#: src/postcard/window.py:1169
 msgid "Edit Draft"
 msgstr ""
 
-#: src/postcard/window.py:1199 src/ui/main-window.blp:300
+#: src/postcard/window.py:1171 src/ui/main-window.blp:283
 msgid "Delete"
 msgstr ""
 
-#: src/postcard/window.py:1203
+#: src/postcard/window.py:1175
 msgid "Move to"
 msgstr ""
 
-#: src/postcard/window.py:1208 src/postcard/window.py:2629
-#: src/ui/main-window.blp:279
+#: src/postcard/window.py:1180 src/postcard/window.py:2601
+#: src/ui/main-window.blp:262
 msgid "Unsubscribe"
 msgstr ""
 
-#: src/postcard/window.py:1227
+#: src/postcard/window.py:1199
 msgid "Unarchive"
 msgstr ""
 
-#: src/postcard/window.py:1228 src/ui/main-window.blp:289
-#: src/ui/main-window.blp:294
+#: src/postcard/window.py:1200 src/ui/main-window.blp:272
+#: src/ui/main-window.blp:277
 msgid "Archive"
 msgstr ""
 
-#: src/postcard/window.py:1260
+#: src/postcard/window.py:1232
 #, python-brace-format
 msgid "Moved to {name}"
 msgid_plural "Moved {n} conversations to {name}"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:1283
+#: src/postcard/window.py:1255
 #, python-brace-format
 msgid "No {role} folder for {account}."
 msgstr ""
@@ -747,128 +812,129 @@ msgstr ""
 #. High priority: a normal toast queues behind whatever is on screen (a
 #. "no such folder" warning, say), and its 5s wait is the whole undo
 #. window -- Undo would appear only once the move had already gone out.
-#: src/postcard/window.py:1380 src/ui/composer-window.blp:159
+#: src/postcard/window.py:1352 src/ui/composer-window.blp:159
 msgid "Undo"
 msgstr ""
 
-#: src/postcard/window.py:1539 src/postcard/window.py:1559
+#: src/postcard/window.py:1511 src/postcard/window.py:1531
 #, python-brace-format
 msgid "Move failed: {msg}"
 msgstr ""
 
-#: src/postcard/window.py:2307
+#: src/postcard/window.py:2279
 msgid "Marking read is not supported by this account"
 msgstr ""
 
-#: src/postcard/window.py:2310
+#: src/postcard/window.py:2282
 msgid "Starring is not supported by this account"
 msgstr ""
 
 #. No UID and no cached copy: nothing to fetch until the next sync.
-#: src/postcard/window.py:2394
+#: src/postcard/window.py:2366
 msgid "This message hasn't finished syncing yet."
 msgstr ""
 
-#: src/postcard/window.py:2399
+#: src/postcard/window.py:2371
 msgid "This message's mailbox is no longer available."
 msgstr ""
 
-#: src/postcard/window.py:2496
+#: src/postcard/window.py:2468
 #, python-brace-format
 msgid "Couldn't save {name}."
 msgstr ""
 
-#: src/postcard/window.py:2509
+#: src/postcard/window.py:2481
 #, python-brace-format
 msgid "Couldn't save {name}: {msg}"
 msgstr ""
 
-#: src/postcard/window.py:2515
+#: src/postcard/window.py:2487
 #, python-brace-format
 msgid "Saved {name}."
 msgstr ""
 
-#: src/postcard/window.py:2567 src/postcard/window.py:2589
+#: src/postcard/window.py:2539 src/postcard/window.py:2561
 #, python-brace-format
 msgid "Couldn't open {name}."
 msgstr ""
 
-#: src/postcard/window.py:2623
+#: src/postcard/window.py:2595
 msgid "Unsubscribe from this list?"
 msgstr ""
 
-#: src/postcard/window.py:2624
+#: src/postcard/window.py:2596
 #, python-brace-format
 msgid "A request will be sent to {destination}."
 msgstr ""
 
-#: src/postcard/window.py:2668
+#: src/postcard/window.py:2640
 msgid "Couldn't unsubscribe. The list didn't accept the request."
 msgstr ""
 
-#: src/postcard/window.py:2670
+#: src/postcard/window.py:2642
 msgid "Unsubscribed. It can take a few days to take effect."
 msgstr ""
 
-#: src/postcard/window.py:2798
+#: src/postcard/window.py:2770
 #, python-brace-format
 msgid "Sent {n} queued message(s)."
 msgstr ""
 
-#: src/postcard/window.py:2836
+#: src/postcard/window.py:2808
 msgid ""
 "A message may have been sent. Check Sent before trying again. Kept in the "
 "Outbox."
 msgstr ""
 
-#: src/postcard/window.py:2871
+#: src/postcard/window.py:2843
 #, python-brace-format
 msgid "Sent to some recipients, but the server refused {addrs}. Will retry."
 msgstr ""
 
-#: src/postcard/window.py:2907
+#: src/postcard/window.py:2879
 #, python-brace-format
 msgid "Couldn't send a queued message. {reason}"
 msgid_plural "Couldn't send {n} queued messages. {reason}"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:3222
+#: src/postcard/window.py:3194
 #, python-brace-format
 msgid "{n} new message"
 msgid_plural "{n} new messages"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:3240
+#: src/postcard/window.py:3212
 #, python-brace-format
 msgid "{n} new messages"
 msgstr ""
 
-#: src/postcard/window.py:3302
+#: src/postcard/window.py:3274
 #, python-brace-format
 msgid "{account}: {reason}"
 msgstr ""
 
-#: src/postcard/window.py:3319
+#: src/postcard/window.py:3291
 msgid "You're offline. Postcard will reconnect when your connection returns."
 msgstr ""
 
-#: src/postcard/window.py:3357
+#: src/postcard/window.py:3329
 msgid "Postcard is running in the background"
 msgstr ""
 
-#: src/postcard/window.py:3358
+#: src/postcard/window.py:3330
 msgid "It will keep checking for new mail. Quit to stop."
 msgstr ""
 
-#: src/ui/account-dialog.blp:5 src/ui/accounts-dialog.blp:31
-#: src/ui/main-window.blp:37
+#: src/ui/account-dialog.blp:5 src/ui/accounts-dialog.blp:21
+#: src/ui/main-window.blp:37 src/ui/provider-dialog.blp:5
 msgid "Add Account"
 msgstr ""
 
 #: src/ui/account-dialog.blp:32 src/ui/fastmail-dialog.blp:19
-#: src/ui/microsoft-dialog.blp:19 src/ui/tuta-dialog.blp:19
+#: src/ui/microsoft-dialog.blp:19 src/ui/proton-dialog.blp:19
+#: src/ui/tuta-dialog.blp:19
 msgid "Account"
 msgstr ""
 
@@ -879,7 +945,8 @@ msgid ""
 msgstr ""
 
 #: src/ui/account-dialog.blp:36 src/ui/fastmail-dialog.blp:27
-#: src/ui/microsoft-dialog.blp:27 src/ui/tuta-dialog.blp:27
+#: src/ui/microsoft-dialog.blp:27 src/ui/proton-dialog.blp:27
+#: src/ui/tuta-dialog.blp:27
 msgid "Display Name"
 msgstr ""
 
@@ -891,7 +958,8 @@ msgstr ""
 msgid "Username"
 msgstr ""
 
-#: src/ui/account-dialog.blp:49 src/ui/tuta-dialog.blp:31
+#: src/ui/account-dialog.blp:49 src/ui/proton-dialog.blp:31
+#: src/ui/tuta-dialog.blp:31
 msgid "Password"
 msgstr ""
 
@@ -923,23 +991,7 @@ msgstr ""
 msgid "Mail Accounts"
 msgstr ""
 
-#: src/ui/accounts-dialog.blp:24
-msgid "Add from Online Accounts"
-msgstr ""
-
-#: src/ui/accounts-dialog.blp:40
-msgid "Add Microsoft 365 Account"
-msgstr ""
-
-#: src/ui/accounts-dialog.blp:47
-msgid "Add Fastmail Account"
-msgstr ""
-
-#: src/ui/accounts-dialog.blp:54
-msgid "Add Tuta Account"
-msgstr ""
-
-#: src/ui/composer-window.blp:5 src/ui/main-window.blp:93
+#: src/ui/composer-window.blp:5 src/ui/main-window.blp:76
 msgid "New Message"
 msgstr ""
 
@@ -995,22 +1047,18 @@ msgstr ""
 msgid "Add Attachment"
 msgstr ""
 
-#: src/ui/fastmail-dialog.blp:5
-msgid "Fastmail"
-msgstr ""
-
 #: src/ui/fastmail-dialog.blp:20
 msgid ""
 "Sign in with Fastmail to add the account. The browser opens outside Postcard."
 msgstr ""
 
 #: src/ui/fastmail-dialog.blp:23 src/ui/microsoft-dialog.blp:23
-#: src/ui/tuta-dialog.blp:23
+#: src/ui/proton-dialog.blp:23 src/ui/tuta-dialog.blp:23
 msgid "Email"
 msgstr ""
 
 #: src/ui/fastmail-dialog.blp:44 src/ui/microsoft-dialog.blp:44
-#: src/ui/tuta-dialog.blp:48
+#: src/ui/proton-dialog.blp:52 src/ui/tuta-dialog.blp:52
 msgid "Sign In"
 msgstr ""
 
@@ -1030,140 +1078,124 @@ msgstr ""
 msgid "Add a mail account to get started."
 msgstr ""
 
-#: src/ui/main-window.blp:43
-msgid "Use Online Accounts"
-msgstr ""
-
-#: src/ui/main-window.blp:49
-msgid "Use Microsoft 365"
-msgstr ""
-
-#: src/ui/main-window.blp:55
-msgid "Use Tuta"
-msgstr ""
-
-#: src/ui/main-window.blp:72 src/ui/main-window.blp:114
+#: src/ui/main-window.blp:55 src/ui/main-window.blp:97
 msgid "Folders"
 msgstr ""
 
-#: src/ui/main-window.blp:79 src/ui/main-window.blp:135
+#: src/ui/main-window.blp:62 src/ui/main-window.blp:118
 msgid "Drag or press Left and Right to resize"
 msgstr ""
 
-#: src/ui/main-window.blp:82
+#: src/ui/main-window.blp:65
 msgid "Resize folder sidebar"
 msgstr ""
 
-#: src/ui/main-window.blp:83 src/ui/main-window.blp:139
+#: src/ui/main-window.blp:66 src/ui/main-window.blp:122
 msgid "Left and Right resize, Home and End jump to the limits, 0 resets"
 msgstr ""
 
-#: src/ui/main-window.blp:102
+#: src/ui/main-window.blp:85
 msgid "Main Menu"
 msgstr ""
 
-#: src/ui/main-window.blp:128 src/ui/main-window.blp:189
+#: src/ui/main-window.blp:111 src/ui/main-window.blp:172
 msgid "Conversations"
 msgstr ""
 
-#: src/ui/main-window.blp:138
+#: src/ui/main-window.blp:121
 msgid "Resize conversation list"
 msgstr ""
 
-#: src/ui/main-window.blp:155
+#: src/ui/main-window.blp:138
 msgid "Show Unread Only"
 msgstr ""
 
-#: src/ui/main-window.blp:161
+#: src/ui/main-window.blp:144
 msgid "Search"
 msgstr ""
 
-#: src/ui/main-window.blp:171 src/ui/main-window.blp:174
+#: src/ui/main-window.blp:154 src/ui/main-window.blp:157
 msgid "Search mail"
 msgstr ""
 
-#: src/ui/main-window.blp:199
+#: src/ui/main-window.blp:182
 msgid "No Messages"
 msgstr ""
 
-#: src/ui/main-window.blp:200
+#: src/ui/main-window.blp:183
 msgid "This folder is empty."
 msgstr ""
 
-#: src/ui/main-window.blp:207
+#: src/ui/main-window.blp:190
 msgid "Checking for Mail…"
 msgstr ""
 
-#: src/ui/main-window.blp:215 src/ui/main-window.blp:326
+#: src/ui/main-window.blp:198 src/ui/main-window.blp:309
 msgid "Loading"
 msgstr ""
 
-#: src/ui/main-window.blp:226
+#: src/ui/main-window.blp:209
 msgid "Reader"
 msgstr ""
 
-#: src/ui/main-window.blp:236
+#: src/ui/main-window.blp:219
 msgid "Reply"
 msgstr ""
 
-#: src/ui/main-window.blp:242
+#: src/ui/main-window.blp:225
 msgid "Reply All"
 msgstr ""
 
-#: src/ui/main-window.blp:248
+#: src/ui/main-window.blp:231
 msgid "Forward"
 msgstr ""
 
-#: src/ui/main-window.blp:273
+#: src/ui/main-window.blp:256
 msgid "Move to Folder"
 msgstr ""
 
-#: src/ui/main-window.blp:310
+#: src/ui/main-window.blp:293
 msgid "Select a Conversation"
 msgstr ""
 
-#: src/ui/main-window.blp:311
+#: src/ui/main-window.blp:294
 msgid "Pick a message from the list to read it here."
 msgstr ""
 
-#: src/ui/main-window.blp:318
+#: src/ui/main-window.blp:301
 msgid "Loading Message…"
 msgstr ""
 
-#: src/ui/main-window.blp:360
+#: src/ui/main-window.blp:343
 msgid "Messages"
 msgstr ""
 
-#: src/ui/main-window.blp:398
+#: src/ui/main-window.blp:381
 msgid "_Add Account"
 msgstr ""
 
-#: src/ui/main-window.blp:402
+#: src/ui/main-window.blp:385
 msgid "_Online Accounts"
 msgstr ""
 
-#: src/ui/main-window.blp:406
+#: src/ui/main-window.blp:389
 msgid "_Manage Accounts"
 msgstr ""
 
-#: src/ui/main-window.blp:413
+#: src/ui/main-window.blp:396
 msgid "_Preferences"
 msgstr ""
 
-#: src/ui/main-window.blp:417
+#: src/ui/main-window.blp:400
 msgid "_Keyboard Shortcuts"
 msgstr ""
 
-#: src/ui/main-window.blp:421
+#: src/ui/main-window.blp:404
 msgid "_About Postcard"
 msgstr ""
 
-#: src/ui/main-window.blp:428
+#: src/ui/main-window.blp:411
 msgid "_Quit"
-msgstr ""
-
-#: src/ui/microsoft-dialog.blp:5
-msgid "Microsoft 365"
 msgstr ""
 
 #: src/ui/microsoft-dialog.blp:20
@@ -1275,6 +1307,32 @@ msgstr ""
 
 #: src/ui/preferences-dialog.blp:52
 msgid "Use the text below as HTML markup, as-is"
+msgstr ""
+
+#: src/ui/proton-dialog.blp:20
+msgid "Sign in with your Proton address."
+msgstr ""
+
+#: src/ui/proton-dialog.blp:35 src/ui/tuta-dialog.blp:35
+msgid "Two-Factor Code (if enabled)"
+msgstr ""
+
+#: src/ui/proton-dialog.blp:65 src/ui/tuta-dialog.blp:65
+msgid "Signing In"
+msgstr ""
+
+#: src/ui/proton-dialog.blp:66
+msgid "Proving your sign-in to Proton. This can take a moment."
+msgstr ""
+
+#: src/ui/provider-dialog.blp:16
+msgid "Choose a Provider"
+msgstr ""
+
+#: src/ui/provider-dialog.blp:17
+msgid ""
+"Sign in with OAuth where your provider offers it, so Postcard never sees "
+"your password."
 msgstr ""
 
 #: src/ui/shortcuts-dialog.blp:8
@@ -1390,36 +1448,10 @@ msgctxt "shortcut window"
 msgid "Insert Link"
 msgstr ""
 
-#: src/ui/tuta-dialog.blp:5
-msgid "Tuta"
-msgstr ""
-
 #: src/ui/tuta-dialog.blp:20
 msgid "Sign in with your Tuta address, including custom-domain addresses."
 msgstr ""
 
-#: src/ui/tuta-dialog.blp:61
-msgid "Signing In"
-msgstr ""
-
-#: src/ui/tuta-dialog.blp:62
+#: src/ui/tuta-dialog.blp:66
 msgid "Unlocking your Tuta keys. This can take a moment."
-msgstr ""
-
-#: src/ui/tuta-dialog.blp:86
-msgid "Second Factor"
-msgstr ""
-
-#: src/ui/tuta-dialog.blp:87
-msgid ""
-"Enter the six-digit code from your authenticator app. Codes change every 30 "
-"seconds, so enter the current one."
-msgstr ""
-
-#: src/ui/tuta-dialog.blp:90
-msgid "Authentication Code"
-msgstr ""
-
-#: src/ui/tuta-dialog.blp:107
-msgid "Verify"
 msgstr ""

@@ -30,6 +30,10 @@ template $PostcardTutaDialog: Adw.Dialog {
                             Adw.PasswordEntryRow password_row {
                                 title: _("Password");
                               }
+
+                            Adw.EntryRow totp_row {
+                                title: _("Two-Factor Code (if enabled)");
+                              }
                           }
 
                         Adw.PreferencesGroup {
@@ -79,40 +83,6 @@ template $PostcardTutaDialog: Adw.Dialog {
                       };
                   }
 
-                Gtk.StackPage {
-                    name: "totp";
-                    child: Adw.PreferencesPage {
-                        Adw.PreferencesGroup {
-                            title: _("Second Factor");
-                            description: _("Enter the six-digit code from your authenticator app. Codes change every 30 seconds, so enter the current one.");
-
-                            Adw.EntryRow totp_row {
-                                title: _("Authentication Code");
-                              }
-                          }
-
-                        Adw.PreferencesGroup {
-                            Gtk.Box {
-                                orientation: horizontal;
-                                spacing: 12;
-                                halign: center;
-
-                                Gtk.Button totp_cancel_button {
-                                    label: _("Cancel");
-
-                                    styles ["pill"]
-                                  }
-
-                                Gtk.Button totp_verify_button {
-                                    label: _("Verify");
-                                    sensitive: false;
-
-                                    styles ["suggested-action", "pill"]
-                                  }
-                              }
-                          }
-                      };
-                  }
               };
           };
       };

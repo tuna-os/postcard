@@ -16,45 +16,11 @@ template $PostcardAccountsDialog: Adw.Dialog {
                     title: _("Mail Accounts");
 
                     [header-suffix]
-                    Gtk.Box {
-                        spacing: 6;
+                    Gtk.Button add_button {
+                        icon-name: "list-add-symbolic";
+                        tooltip-text: _("Add Account");
 
-                        Gtk.Button online_accounts_button {
-                            icon-name: "goa-panel-symbolic";
-                            tooltip-text: _("Add from Online Accounts");
-
-                            styles ["flat"]
-                          }
-
-                        Gtk.Button add_button {
-                            icon-name: "list-add-symbolic";
-                            tooltip-text: _("Add Account");
-
-                            styles ["flat"]
-                          }
-                      }
-                  }
-
-                Adw.PreferencesGroup {
-                    Gtk.Button microsoft_button {
-                        label: _("Add Microsoft 365 Account");
-                        halign: center;
-
-                        styles ["pill"]
-                      }
-
-                    Gtk.Button fastmail_button {
-                        label: _("Add Fastmail Account");
-                        halign: center;
-
-                        styles ["pill"]
-                      }
-
-                    Gtk.Button tuta_button {
-                        label: _("Add Tuta Account");
-                        halign: center;
-
-                        styles ["pill"]
+                        styles ["flat"]
                       }
                   }
               };

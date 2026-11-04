@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk
 
 from . import mail_sync, message_view
-from .account_dialog import PostcardAccountDialog
 from .accounts_dialog import PostcardAccountsDialog
 from .avatar_loader import AvatarLoader
 from .composer_window import (
@@ -40,14 +39,12 @@ from .core.models.attachment import Attachment
 from .core.models.conversation import Conversation
 from .core.models.email import Email
 from .core.models.folder import Folder
-from .core.net import errors, imap_session, ms_oauth, smtp_session
+from .core.net import errors, imap_session, smtp_session
 from .core.net.tuta_session import TutaError
 from .core.store.database import Database, OutboxState, QueuedSend
 from .folder_row import FolderRow
 from .message_view import LoadCallback, MessageView
-from .microsoft_dialog import PostcardMicrosoftDialog
-from .online_accounts_dialog import PostcardOnlineAccountsDialog
-from .tuta_dialog import PostcardTutaDialog
+from .provider_dialog import PostcardProviderDialog
 from .window_types import (
     ALL_INBOXES_ID,
     FOLDER_SYNC_COOLDOWN_SECONDS,
@@ -148,9 +145,6 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     thread_box: Gtk.Box = Gtk.Template.Child()
     main_stack: Gtk.Stack = Gtk.Template.Child()
     add_account_button: Gtk.Button = Gtk.Template.Child()
-    online_accounts_button: Gtk.Button = Gtk.Template.Child()
-    microsoft_button: Gtk.Button = Gtk.Template.Child()
-    tuta_button: Gtk.Button = Gtk.Template.Child()
     refresh_button: Gtk.Button = Gtk.Template.Child()
     search_bar: Gtk.SearchBar = Gtk.Template.Child()
     search_entry: Gtk.SearchEntry = Gtk.Template.Child()
@@ -290,12 +284,6 @@ class PostcardMainWindow(Adw.ApplicationWindow):
 
     def _connect_widgets(self) -> None:
         self.add_account_button.connect("clicked", self._on_add_account_clicked)
-        self.online_accounts_button.connect("clicked", self._on_online_accounts_clicked)
-        self.microsoft_button.connect("clicked", self._on_microsoft_clicked)
-        self.microsoft_button.set_visible(bool(ms_oauth.MS_CLIENT_ID))
-        # Always shown: the helper ships with the app, so a missing one is a
-        # broken install the dialog reports, not a flow to hide.
-        self.tuta_button.connect("clicked", self._on_tuta_clicked)
         self.refresh_button.connect("clicked", self._on_refresh_clicked)
         self.compose_button.connect("clicked", self._on_compose_clicked)
         self.reply_all_button.connect("clicked", self._on_reply_all_clicked)
@@ -635,22 +623,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         return False
 
     def _on_add_account_clicked(self, *_args: object) -> None:
-        dialog = PostcardAccountDialog(self._db)
-        dialog.connect("account-added", self._on_account_added)
-        dialog.present(self)
-
-    def _on_online_accounts_clicked(self, *_args: object) -> None:
-        dialog = PostcardOnlineAccountsDialog(self._db)
-        dialog.connect("account-added", self._on_account_added)
-        dialog.present(self)
-
-    def _on_microsoft_clicked(self, *_args: object) -> None:
-        dialog = PostcardMicrosoftDialog(self._db)
-        dialog.connect("account-added", self._on_account_added)
-        dialog.present(self)
-
-    def _on_tuta_clicked(self, *_args: object) -> None:
-        dialog = PostcardTutaDialog(self._db)
+        dialog = PostcardProviderDialog(self._db)
         dialog.connect("account-added", self._on_account_added)
         dialog.present(self)
 
@@ -829,7 +802,6 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             ("refresh", self._on_refresh_clicked),
             ("search", self._on_search_action),
             ("add-account", self._on_add_account_clicked),
-            ("online-accounts", self._on_online_accounts_clicked),
             ("manage-accounts", self._on_manage_accounts),
         ):
             _register(self, name, handler)

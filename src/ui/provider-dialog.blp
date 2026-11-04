@@ -1,0 +1,22 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $PostcardProviderDialog: Adw.Dialog {
+    title: _("Add Account");
+    content-width: 480;
+    content-height: 480;
+
+    child: Adw.ToolbarView {
+        [top]
+        Adw.HeaderBar {}
+
+        content: Gtk.ScrolledWindow {
+            child: Adw.PreferencesPage {
+                Adw.PreferencesGroup providers_group {
+                    title: _("Choose a Provider");
+                    description: _("Sign in with OAuth where your provider offers it, so Postcard never sees your password.");
+                  }
+              };
+          };
+      };
+  }

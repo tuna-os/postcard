@@ -1,0 +1,88 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $PostcardProtonDialog: Adw.Dialog {
+    title: _("Proton");
+    content-width: 480;
+    content-height: 480;
+
+    child: Adw.ToastOverlay toast_overlay {
+        child: Adw.ToolbarView {
+            [top]
+            Adw.HeaderBar {}
+
+            content: Gtk.Stack dialog_stack {
+                Gtk.StackPage {
+                    name: "form";
+                    child: Adw.PreferencesPage {
+                        Adw.PreferencesGroup {
+                            title: _("Account");
+                            description: _("Sign in with your Proton address.");
+
+                            Adw.EntryRow email_row {
+                                title: _("Email");
+                              }
+
+                            Adw.EntryRow display_name_row {
+                                title: _("Display Name");
+                              }
+
+                            Adw.PasswordEntryRow password_row {
+                                title: _("Password");
+                              }
+
+                            Adw.EntryRow totp_row {
+                                title: _("Two-Factor Code (if enabled)");
+                              }
+                          }
+
+                        Adw.PreferencesGroup {
+                            Gtk.Box {
+                                orientation: horizontal;
+                                spacing: 12;
+                                halign: center;
+
+                                Gtk.Button cancel_button {
+                                    label: _("Cancel");
+
+                                    styles ["pill"]
+                                  }
+
+                                Gtk.Button sign_in_button {
+                                    label: _("Sign In");
+                                    sensitive: false;
+
+                                    styles ["suggested-action", "pill"]
+                                  }
+                              }
+                          }
+                      };
+                  }
+
+                Gtk.StackPage {
+                    name: "progress";
+                    child: Adw.StatusPage {
+                        title: _("Signing In");
+                        description: _("Proving your sign-in to Proton. This can take a moment.");
+                        child: Gtk.Box {
+                            orientation: vertical;
+                            spacing: 12;
+                            halign: center;
+
+                            Gtk.Spinner {
+                                spinning: true;
+                                halign: center;
+                              }
+
+                            Gtk.Button progress_cancel_button {
+                                label: _("Cancel");
+
+                                styles ["pill"]
+                              }
+                          };
+                      };
+                  }
+              };
+          };
+      };
+  }
