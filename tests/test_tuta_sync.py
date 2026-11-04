@@ -54,6 +54,18 @@ def tuta(monkeypatch):
                     "all_ids": [] if kwargs["offset"] == 0 else None,
                     "offset": kwargs["offset"],
                 }
+            if operation in ("mark_read", "move"):
+                return {
+                    "outcomes": [{"id": uid, "code": None} for uid in kwargs["ids"]]
+                }
+            if operation == "send":
+                return {
+                    "message_id": "server-1",
+                    "sent_date_ms": 0,
+                    "sent_mail": "lists/sent",
+                    "internal_recipients": None,
+                    "external_recipients": None,
+                }
             return {}
 
     def forbidden(*args, **kwargs):
@@ -108,14 +120,21 @@ def test_native_read_and_move_never_fall_back(tuta, monkeypatch):
     assert [op for op, _ in requests] == ["mark_read", "move"]
 
 
-def test_send_refuses_instead_of_downgrading_encryption(tuta):
+def test_send_marks_ordinary_delivery_explicit_never_silent(tuta):
     account, credential, requests = tuta
-    with pytest.raises(TutaError) as caught:
-        mail_sync.send_message(
-            account, credential, account.email, ["other@example.com"], b"message"
-        )
-    assert caught.value.code == "unsupported_operation"
-    assert requests == []
+    raw = (
+        b"From: ada@tuta.com\r\nTo: other@example.com\r\nSubject: hi\r\n"
+        b"Content-Type: text/plain\r\n\r\nbody"
+    )
+    outcome = mail_sync.send_message(
+        account, credential, account.email, ["other@example.com"], raw
+    )
+    assert outcome.filed_uid == "lists/sent"
+    ((operation, params),) = requests
+    assert operation == "send"
+    assert params["delivery"] == "ordinary"
+    assert params["ordinary_confirmed"] is True
+    assert params["sender"] == account.email
 
 
 def test_tuta_watcher_uses_polling_instead_of_opening_imap(tuta):

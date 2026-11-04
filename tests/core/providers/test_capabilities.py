@@ -44,6 +44,7 @@ ALL = frozenset(Capability)
                     Capability.FETCH_BODY,
                     Capability.SET_FLAGS,
                     Capability.MOVE,
+                    Capability.SEND,
                 }
             ),
         ),

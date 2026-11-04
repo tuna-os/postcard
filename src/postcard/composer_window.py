@@ -27,9 +27,10 @@ from gi.repository import (
 from . import mail_sync
 from .core import compose, secrets
 from .core.lifecycle import JobToken, Lifecycle
-from .core.models.account import Account
+from .core.models.account import PROTOCOL_TUTA, Account
 from .core.models.attachment import Attachment
 from .core.net import errors, smtp_session
+from .core.net.tuta_session import TutaError
 from .core.store.database import Database, OutboxState, QueuedSend
 from .core.threader import NO_SUBJECT
 
@@ -440,6 +441,8 @@ class PostcardComposerWindow(Adw.Window):
             )
         )
         self.form.prepend(self._delivery_banner)
+        self._tuta_delivery: str | None = None
+        self._build_delivery_choice()
         self._update_provider_support()
         self.to_row.set_text(to)
         self.cc_row.set_text(cc)
@@ -590,17 +593,56 @@ class PostcardComposerWindow(Adw.Window):
         self._update_send_sensitivity()
         self._mark_edited()
 
+    def _build_delivery_choice(self) -> None:
+        # Built in code rather than the template: it only ever appears for a
+        # Tuta account. Secure delivery stays visibly unavailable rather than
+        # silently degrading; ordinary delivery needs an explicit opt-in per
+        # account choice, never a default.
+        self._delivery_group = Adw.PreferencesGroup(title=_("Delivery"))
+        self._secure_radio = Gtk.CheckButton(valign=Gtk.Align.CENTER)
+        self._secure_radio.set_sensitive(False)
+        secure_row = Adw.ActionRow(
+            title=_("Secure delivery"),
+            subtitle=_("End-to-end encrypted. Not available for Tuta yet."),
+            activatable_widget=self._secure_radio,
+        )
+        secure_row.set_sensitive(False)
+        secure_row.add_prefix(self._secure_radio)
+        self._ordinary_radio = Gtk.CheckButton(valign=Gtk.Align.CENTER)
+        self._ordinary_radio.set_group(self._secure_radio)
+        ordinary_row = Adw.ActionRow(
+            title=_("Ordinary delivery"),
+            subtitle=_("Sends without Tuta encryption"),
+            activatable_widget=self._ordinary_radio,
+        )
+        ordinary_row.add_prefix(self._ordinary_radio)
+        self._delivery_group.add(secure_row)
+        self._delivery_group.add(ordinary_row)
+        self._ordinary_radio.connect("toggled", self._on_delivery_chosen)
+        self.form.prepend(self._delivery_group)
+
     def _update_provider_support(self) -> None:
         """Whether this account's provider can send, on the Send action.
 
         Asked of the descriptor, so an account whose provider is unknown or
         untrusted fails closed to a disabled Send and a banner -- never to a
         send attempted against the wrong backend. Drafts still save locally.
+        A Tuta account additionally shows the delivery choice, reset so the
+        opt-in is explicit for every account it is made on.
         """
         self._can_send = mail_sync.provider_supports(
             self._account.protocol, mail_sync.Capability.SEND
         )
         self._delivery_banner.set_revealed(not self._can_send)
+        is_tuta = self._account.protocol == PROTOCOL_TUTA
+        self._tuta_delivery = None
+        self._ordinary_radio.set_active(False)
+        self._delivery_group.set_visible(is_tuta and self._can_send)
+
+    def _on_delivery_chosen(self, button: Gtk.CheckButton) -> None:
+        if button.get_active():
+            self._tuta_delivery = "ordinary"
+            self._update_send_sensitivity()
 
     def _build_editor(self) -> None:
         manager = WebKit.UserContentManager()
@@ -721,8 +763,12 @@ class PostcardComposerWindow(Adw.Window):
 
     def _update_send_sensitivity(self, *_args: object) -> None:
         has_recipient = bool(self._to_addrs() or self._cc_addrs() or self._bcc_addrs())
+        delivery_ok = (
+            self._account.protocol != PROTOCOL_TUTA or self._tuta_delivery == "ordinary"
+        )
         self._actions["send"].set_enabled(
             self._can_send
+            and delivery_ok
             and has_recipient
             and bool(self.subject_row.get_text().strip())
         )
@@ -1035,6 +1081,20 @@ class PostcardComposerWindow(Adw.Window):
                 self.destroy()
             return False
         mail_sync.release_queued_send(email_id)
+        if isinstance(error, TutaError) and error.code == "send_uncertain":
+            # The mail may have gone out: terminal-fail it for a human to
+            # check Sent instead of queueing an automatic retry that could
+            # deliver it twice. The Outbox keeps it, visibly failed.
+            self._db.fail_outbox_email(email_id, str(error), OutboxState.FAILED)
+            self.emit(
+                "finished",
+                _(
+                    "The message may have been sent. "
+                    "Check Sent before trying again. Kept in the Outbox."
+                ),
+            )
+            self.destroy()
+            return False
         if isinstance(error, smtp_session.SmtpRefusedError):
             state = mail_sync.fail_refused_send(
                 self._db, email_id, error.refused, str(error)

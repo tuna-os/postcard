@@ -210,6 +210,46 @@ def test_resume_and_factor_taxonomy_survives_the_transport(code):
     assert caught.value.code == code
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "invalid_batch",
+        "invalid_recipient",
+        "sender_unknown",
+        "body_too_large",
+        "confidential_send_unsupported",
+        "ordinary_delivery_requires_consent",
+        "send_failed",
+        "send_uncertain",
+    ],
+)
+def test_send_taxonomy_survives_the_transport(code):
+    def transport(request):
+        return {"version": 1, "error": {"code": code}}
+
+    with pytest.raises(TutaError) as caught:
+        TutaSession(CREDENTIAL, transport).request("send")
+    assert caught.value.code == code
+
+
+def test_an_uncertain_send_names_the_risk_in_plain_text():
+    error = TutaError("send_uncertain")
+    assert "may have been sent" in str(error)
+    assert "Check Sent" in str(error)
+    assert str(TutaError("send_failed")) == (
+        "The experimental Tuta operation could not be completed."
+    )
+
+
+def test_a_retired_code_collapses_instead_of_passing_through():
+    def transport(request):
+        return {"version": 1, "error": {"code": "invalid_move_batch"}}
+
+    with pytest.raises(TutaError) as caught:
+        TutaSession(CREDENTIAL, transport).request("move")
+    assert caught.value.code == "request_failed"
+
+
 def test_revoke_sends_the_stored_session():
     requests = []
 
