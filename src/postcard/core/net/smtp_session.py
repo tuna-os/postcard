@@ -53,11 +53,19 @@ class SmtpSession:
 
     def send_raw(self, from_addr: str, recipients: list[str], raw: bytes) -> None:
         try:
-            self._require_smtp().sendmail(from_addr, recipients, raw)
+            refused = self._require_smtp().sendmail(from_addr, recipients, raw)
         except smtplib.SMTPException as error:
             raise SmtpError(
                 f"could not send to {', '.join(recipients)}: {error}"
             ) from error
+        if refused:
+            # sendmail reports per-recipient refusals by returning them, not by
+            # raising: an empty dict is the only proof every recipient took it.
+            details = "; ".join(
+                f"{address}: {code} {response.decode('ascii', 'replace').strip()}"
+                for address, (code, response) in refused.items()
+            )
+            raise SmtpError(f"could not send to {', '.join(refused)}: {details}")
 
     def _require_smtp(self) -> smtplib.SMTP:
         # Never return None: `if self._smtp is not None` around the sendmail

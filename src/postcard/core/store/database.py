@@ -1,11 +1,14 @@
+import json
 import logging
 import math
 import os
 import sqlite3
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from email.parser import BytesHeaderParser
+from enum import StrEnum
 
 from gi.repository import GLib
 
@@ -129,6 +132,20 @@ MIGRATIONS = [
     """,
     # NULL until the next sync reads it; see set_folder_uidvalidity.
     "ALTER TABLE folders ADD COLUMN uidvalidity INTEGER",
+    # The Outbox queue: every mail waiting to go out gets a row holding its
+    # send state, attempt count, last error and full envelope -- including Bcc
+    # recipients, which the stored message itself must never name. It goes with
+    # its email row; a terminal 'failed' row stays until the user deletes it.
+    """
+    CREATE TABLE IF NOT EXISTS outbox_queue (
+        email_id INTEGER PRIMARY KEY REFERENCES emails(id) ON DELETE CASCADE,
+        state TEXT NOT NULL DEFAULT 'ready',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT '',
+        last_error TEXT NOT NULL DEFAULT '',
+        envelope TEXT NOT NULL DEFAULT '[]'
+    );
+    """,
 ]
 
 
@@ -252,6 +269,35 @@ def restrict_cache_permissions(path: str) -> None:
             pass
         except OSError:
             logger.warning("could not restrict %s", path + suffix, exc_info=True)
+
+
+class OutboxState(StrEnum):
+    """Where a queued mail stands. 'sent' and 'draft' never reach the table:
+    a sent mail's row is deleted, and a draft has none yet."""
+
+    READY = "ready"
+    SENDING = "sending"
+    RETRY = "retry"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedSend:
+    """One mail waiting to go out, as plain values for a worker snapshot.
+
+    envelope is None only for mail queued before the queue table existed; its
+    recipients are derived from the raw message instead, which loses Bcc.
+    """
+
+    email_id: int
+    subject: str
+    raw: bytes
+    message_id: str
+    state: OutboxState
+    attempts: int
+    envelope: list[str] | None
+    last_error: str = ""
+    updated_at: str = ""
 
 
 class Database:
@@ -951,3 +997,173 @@ class Database:
             f"{row['name']} <{row['address']}>" if row["name"] else row["address"]
             for row in rows
         ]
+
+    # --- Outbox queue: one row per mail waiting to go out -------------------
+    # The queued-send state machine is draft -> ready -> sending -> sent, with
+    # failed attempts landing on retry (or terminal failed). 'sent' deletes the
+    # row; 'draft' never has one. Main thread only, like every other method:
+    # the main thread claims a row before its worker starts and completes or
+    # fails it when the worker reports back.
+
+    def queue_outbox_email(self, email_id: int, recipients: list[str]) -> None:
+        """Mark a mail ready to send, keeping its full envelope.
+
+        The envelope carries every SMTP recipient including Bcc, which the
+        stored message must never name -- extract_recipients cannot recover it
+        from the raw bytes, so a retry without this would silently drop Bcc.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO outbox_queue (email_id, state, envelope)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email_id) DO UPDATE SET
+                state = excluded.state, envelope = excluded.envelope
+                WHERE outbox_queue.state IN ('ready', 'retry')
+            """,
+            (email_id, OutboxState.READY, json.dumps(recipients)),
+        )
+        self._conn.commit()
+
+    def claim_outbox_email(self, email_id: int) -> QueuedSend | None:
+        """Take a queued mail into sending, counting the attempt. None when
+        another send already holds it, or it reached terminal failed."""
+        cursor = self._conn.execute(
+            """
+            UPDATE outbox_queue
+            SET state = ?, attempts = attempts + 1, updated_at = ?
+            WHERE email_id = ? AND state IN ('ready', 'retry')
+            """,
+            (OutboxState.SENDING, _now_iso(), email_id),
+        )
+        self._conn.commit()
+        if cursor.rowcount == 0:
+            return None
+        return self.queued_send(email_id)
+
+    def queued_send(self, email_id: int) -> QueuedSend | None:
+        """The queued send for a mail, or None when it has no queue row."""
+        row = self._conn.execute(
+            """
+            SELECT e.subject, e.raw_message, e.message_id,
+                q.state, q.attempts, q.envelope, q.last_error, q.updated_at
+            FROM emails e JOIN outbox_queue q ON q.email_id = e.id
+            WHERE e.id = ?
+            """,
+            (email_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return QueuedSend(
+            email_id=email_id,
+            subject=row["subject"],
+            raw=row["raw_message"],
+            message_id=row["message_id"] or "",
+            state=OutboxState(row["state"]),
+            attempts=row["attempts"],
+            envelope=json.loads(row["envelope"]),
+            last_error=row["last_error"],
+            updated_at=row["updated_at"],
+        )
+
+    def complete_outbox_email(self, email_id: int) -> None:
+        """Forget a queued send that went out. The caller files the Sent copy
+        and deletes the Outbox row, which would cascade here anyway."""
+        self._conn.execute("DELETE FROM outbox_queue WHERE email_id = ?", (email_id,))
+        self._conn.commit()
+
+    def fail_outbox_email(self, email_id: int, error: str, state: OutboxState) -> None:
+        """Record a failed attempt as retry or terminal failed, with the reason
+        the next drain shows. Only a claimed (sending) row can fail."""
+        self._conn.execute(
+            """
+            UPDATE outbox_queue
+            SET state = ?, last_error = ?, updated_at = ?
+            WHERE email_id = ? AND state = ?
+            """,
+            (state, error, _now_iso(), email_id, OutboxState.SENDING),
+        )
+        self._conn.commit()
+
+    def recover_interrupted_sends(self, except_ids: set[int] | None = None) -> int:
+        """Ready every send left sending by a crash, so the drain retries it.
+
+        A crash between SMTP acceptance and completion leaves exactly this: a
+        sending row whose mail may or may not have left. The retry proves which
+        by looking for its own copy in Sent before touching SMTP. except_ids
+        are claims a live send in this process still holds -- recovering one
+        would let a second worker send it too.
+        """
+        if except_ids:
+            placeholders = ", ".join("?" for _ in except_ids)
+            cursor = self._conn.execute(
+                "UPDATE outbox_queue SET state = ? WHERE state = ?"
+                f" AND email_id NOT IN ({placeholders})",
+                (OutboxState.READY, OutboxState.SENDING, *except_ids),
+            )
+        else:
+            cursor = self._conn.execute(
+                "UPDATE outbox_queue SET state = ? WHERE state = ?",
+                (OutboxState.READY, OutboxState.SENDING),
+            )
+        self._conn.commit()
+        return cursor.rowcount
+
+    def pending_outbox_sends(self, outbox_folder_id: int) -> list[QueuedSend]:
+        """Every Outbox mail with something to send, oldest first.
+
+        Terminal failed rows are excluded -- they stay visible in the Outbox
+        until the user deletes them. A mail with no queue row yet (queued
+        before this table existed) reads back as ready with no envelope, and
+        the drain derives its recipients from the raw message instead.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT e.id, e.subject, e.raw_message, e.message_id,
+                q.state, q.attempts, q.envelope, q.last_error, q.updated_at
+            FROM emails e LEFT JOIN outbox_queue q ON q.email_id = e.id
+            WHERE e.folder_id = ?
+                AND e.raw_message IS NOT NULL
+                AND (q.state IS NULL OR q.state IN ('ready', 'retry', 'sending'))
+            ORDER BY e.id
+            """,
+            (outbox_folder_id,),
+        ).fetchall()
+        sends = []
+        for row in rows:
+            envelope = json.loads(row["envelope"]) if row["envelope"] else None
+            sends.append(
+                QueuedSend(
+                    email_id=row["id"],
+                    subject=row["subject"],
+                    raw=row["raw_message"],
+                    message_id=row["message_id"] or "",
+                    state=(
+                        OutboxState(row["state"]) if row["state"] else OutboxState.READY
+                    ),
+                    attempts=row["attempts"] or 0,
+                    envelope=envelope,
+                    last_error=row["last_error"] or "",
+                    updated_at=row["updated_at"] or "",
+                )
+            )
+        return sends
+
+    def delete_emails_by_message_id(self, folder_id: int, message_id: str) -> None:
+        """Drop a folder's rows for one Message-ID, before filing its copy.
+
+        Filing is not always the first attempt: a retry that finds its mail
+        already in Sent files the local copy without resending, and a crash
+        between an earlier filing and its Outbox cleanup files it twice. The
+        second insert would collide with the first under idx_emails_uid, so
+        the earlier copy goes first. Never call with an empty id: rows filed
+        before Message-IDs were recorded would all match.
+        """
+        self._conn.execute(
+            "DELETE FROM emails WHERE folder_id = ? AND message_id = ?",
+            (folder_id, message_id),
+        )
+        self._conn.commit()
+
+
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat()

@@ -261,7 +261,7 @@ def test_paging_past_the_oldest_message_returns_nothing(monkeypatch):
 
 
 class AppendingImap(FakeImap):
-    def __init__(self, reply=("OK", [b"[APPENDUID 1 7] APPEND completed"])):
+    def __init__(self, reply=("OK", [b"APPEND completed"])):
         super().__init__()
         self._reply = reply
         self.capabilities = ("IMAP4REV1", "X-GM-EXT-1")
@@ -287,6 +287,60 @@ def test_append_raises_when_the_server_refuses(monkeypatch):
 
     with pytest.raises(ImapError, match="could not append to Sent"):
         session.append("Sent", b"raw")
+
+
+def test_append_returns_the_uidplus_assignment(monkeypatch):
+    imap = AppendingImap(("OK", [b"[APPENDUID 38505 3955] APPEND completed"]))
+    session = connect(monkeypatch, imap)
+
+    assert session.append("Sent", b"raw") == (38505, "3955")
+
+
+def test_append_without_uidplus_files_the_copy_but_returns_no_link(monkeypatch):
+    # A server with no UIDPLUS still took the copy; only the link back to it
+    # is lost, which the caller records as None rather than a failure.
+    session = connect(monkeypatch, AppendingImap())
+
+    assert session.append("Sent", b"raw") is None
+
+
+def test_append_ignores_a_mangled_appenduid(monkeypatch):
+    imap = AppendingImap(("OK", [b"[APPENDUID huh] APPEND completed"]))
+    session = connect(monkeypatch, imap)
+
+    assert session.append("Sent", b"raw") is None
+
+
+def test_append_ignores_digits_without_the_code(monkeypatch):
+    # A bare digit pair that is not an APPENDUID code links nothing: matching
+    # it would file the copy under another message's UID.
+    imap = AppendingImap(("OK", [b"APPEND completed in 2 tries"]))
+    session = connect(monkeypatch, imap)
+
+    assert session.append("Sent", b"raw") is None
+
+
+def test_search_message_id_returns_the_matching_uids(monkeypatch):
+    imap = FakeImap(search_reply=("OK", [b"7 9"]))
+    session = connect(monkeypatch, imap)
+
+    assert session.search_message_id("<abc@example.com>") == {"7", "9"}
+    assert imap.calls == [("SEARCH", "HEADER", "Message-ID", '"<abc@example.com>"')]
+
+
+def test_search_message_id_ignores_non_uid_tokens(monkeypatch):
+    imap = FakeImap(search_reply=("OK", [b"7 junk"]))
+    session = connect(monkeypatch, imap)
+
+    assert session.search_message_id("<abc@example.com>") == {"7"}
+
+
+def test_search_message_id_raises_when_the_server_refuses(monkeypatch):
+    imap = FakeImap(search_reply=("NO", [b"nope"]))
+    session = connect(monkeypatch, imap)
+
+    with pytest.raises(ImapError, match="search failed"):
+        session.search_message_id("<abc@example.com>")
 
 
 def test_has_capability_is_case_insensitive(monkeypatch):

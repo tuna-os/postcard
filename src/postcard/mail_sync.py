@@ -12,7 +12,9 @@ from datetime import date, datetime
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from functools import lru_cache
 from gettext import gettext as _
+from urllib.parse import quote
 
+from .core.compose import extract_recipients
 from .core.lifecycle import Lifecycle
 from .core.mime.message_parser import clock_format
 from .core.models.account import Account
@@ -45,7 +47,7 @@ from .core.net.imap_session import (
 from .core.net.proton_session import ProtonError
 from .core.net.smtp_session import SmtpSession
 from .core.net.tuta_session import TutaError, TutaSession
-from .core.store.database import Database
+from .core.store.database import Database, OutboxState, QueuedSend
 from .core.threader import NO_SUBJECT
 
 logger = logging.getLogger(__name__)
@@ -733,14 +735,34 @@ def move_messages(
     return MoveResult(destination_uids)
 
 
+@dataclass(frozen=True, slots=True)
+class SendOutcome:
+    """How a send went. The mail left; this says about its Sent copy.
+
+    filed_uid is the UID the server filed it under (UIDPLUS), or None when the
+    server files its own copy (Gmail, Exchange) or reports none. file_error is
+    set only when the send succeeded but the Sent filing failed after it --
+    the mail went out, so this must never send it again, only say so.
+    """
+
+    filed_uid: str | None
+    uidvalidity: int | None
+    file_error: Exception | None
+
+
 def send_message(
     account: Account,
     credential: Credential,
     from_addr: str,
     recipients: list[str],
     raw: bytes,
-) -> None:
-    """Connect, log in, and hand a fully-built message to the server."""
+) -> SendOutcome:
+    """Connect, log in, and hand a fully-built message to the server.
+
+    Raises when the mail did not go out. A Sent filing that fails after a
+    successful send comes back as file_error instead of raising: raising there
+    would leave the mail in the Outbox to be sent a second time.
+    """
     if account.is_tuta:
         # Sending stays unavailable until native recipient encryption is ready.
         raise TutaError("unsupported_operation")
@@ -749,7 +771,7 @@ def send_message(
     if account.is_graph:
         # Exchange files the Sent copy itself, so there is nothing to append.
         graph_send.send_mime(GraphSession(credential), raw, recipients)
-        return
+        return SendOutcome(None, None, None)
     session = SmtpSession(account.smtp_host, account.smtp_port, account.smtp_security)
     session.connect()
 
@@ -764,14 +786,19 @@ def send_message(
     # other client. Never fatal: it has already gone out, and failing here would
     # leave it in the Outbox to be sent a second time.
     try:
-        _append_to_sent(account, credential, raw)
-    except Exception:
+        filed = _append_to_sent(account, credential, raw)
+    except Exception as error:
         logger.warning(
             "could not save a copy of the sent message to Sent on %s (account %s)",
             account.imap_host,
             account.email,
             exc_info=True,
         )
+        return SendOutcome(None, None, error)
+    if filed is None:
+        return SendOutcome(None, None, None)
+    uidvalidity, uid = filed
+    return SendOutcome(uid, uidvalidity, None)
 
 
 class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
@@ -817,10 +844,16 @@ def post_unsubscribe(url: str) -> None:
     _unsubscribe_opener.open(request, timeout=UNSUBSCRIBE_TIMEOUT_SECONDS).close()
 
 
-def _append_to_sent(account: Account, credential: Credential, raw: bytes) -> None:
+def _append_to_sent(
+    account: Account, credential: Credential, raw: bytes
+) -> tuple[int, str] | None:
+    """File a sent message in the server's Sent mailbox. Returns the
+    (UIDVALIDITY, UID) UIDPLUS assigned it, or None when there is nothing to
+    link back to: Gmail files its own copy, some servers have no Sent mailbox,
+    and some report no APPENDUID."""
     with _pooled_session(account, credential) as session:
         if session.has_capability(GMAIL_CAPABILITY):
-            return
+            return None
         sent = mailbox_with_role(
             (mailbox.name for mailbox in session.list_folders()), FolderRole.SENT
         )
@@ -828,8 +861,174 @@ def _append_to_sent(account: Account, credential: Credential, raw: bytes) -> Non
             logger.warning(
                 "no Sent mailbox on %s (account %s)", account.imap_host, account.email
             )
-            return
-        session.append(sent, raw)
+            return None
+        return session.append(sent, raw)
+
+
+# --- queued sends ----------------------------------------------------------
+# The Outbox as a state machine, worked from the main thread: claim a row
+# before its worker starts, complete or fail it when the worker reports back.
+# A crash between SMTP acceptance and completion leaves a sending row whose
+# mail may or may not have left, so every attempt looks for its own copy in
+# Sent before touching SMTP -- the only proof either way.
+
+# How many attempts a queued mail gets before it rests as terminal failed,
+# staying visible in the Outbox until the user deletes it.
+MAX_SEND_ATTEMPTS = 5
+
+# Email ids a send in this process claimed and has not finished. Recovery
+# skips these: a row a live worker is sending looks exactly like a crashed
+# one, and recovering it would send it twice. Main thread only.
+_live_claims: set[int] = set()
+
+
+def claim_queued_send(db: Database, email_id: int) -> QueuedSend | None:
+    """Claim a queued mail for a send starting now. None when another send
+    already holds it, or it reached terminal failed."""
+    claimed = db.claim_outbox_email(email_id)
+    if claimed is not None:
+        _live_claims.add(email_id)
+    return claimed
+
+
+def release_queued_send(email_id: int) -> None:
+    """Let go of a claim without completing it, for a send whose result was
+    dropped. Its row stays to be recovered and retried by the next drain."""
+    _live_claims.discard(email_id)
+
+
+def recover_queued_sends(db: Database) -> int:
+    """Ready every send a crash interrupted, except claims a live send holds."""
+    return db.recover_interrupted_sends(set(_live_claims))
+
+
+def fail_queued_send(db: Database, email_id: int, error: str) -> OutboxState:
+    """Record a failed attempt, terminal past the attempt cap. Returns the
+    state the row landed on. error is diagnostics for the next drain to show,
+    so it is classified before it ever reaches the user."""
+    send = db.queued_send(email_id)
+    if send is None:
+        return OutboxState.FAILED
+    state = (
+        OutboxState.FAILED if send.attempts >= MAX_SEND_ATTEMPTS else OutboxState.RETRY
+    )
+    db.fail_outbox_email(email_id, error, state)
+    return state
+
+
+def send_queued(
+    account: Account, credential: Credential, job: QueuedSend
+) -> SendOutcome:
+    """Send one claimed Outbox mail, skipping SMTP when it already went out.
+
+    Runs on the worker thread: network only, like every other send. Every
+    attempt looks for its own copy in Sent first -- a retry whose last try
+    sent before dying must not re-send, and only a delivery already on record
+    proves the mail reached the outside. The check costs one Sent lookup per
+    send, and when Sent itself is unreachable the attempt fails rather than
+    sending mail the next retry could not recognize.
+    """
+    if job.message_id:
+        found = _sent_copy(account, credential, job.message_id)
+        if found is not None:
+            uid, uidvalidity = found
+            logger.info(
+                "not resending %r via %s (account %s): already in Sent",
+                job.subject,
+                account.smtp_host,
+                account.email,
+            )
+            return SendOutcome(uid, uidvalidity, None)
+    recipients = (
+        job.envelope if job.envelope is not None else extract_recipients(job.raw)
+    )
+    return send_message(account, credential, account.email, recipients, job.raw)
+
+
+def _sent_copy(
+    account: Account, credential: Credential, message_id: str
+) -> tuple[str, int | None] | None:
+    """The (UID, UIDVALIDITY) of this account's Sent copy of message_id, if any.
+
+    None means the copy is absent -- or the account files no copy to look for.
+    A check that fails raises instead of reading as absent: sending on after a
+    failed check could send a second copy of mail that already went out, while
+    failing the attempt only retries it. Graph ids are immutable, so those
+    carry no validity.
+    """
+    if account.is_tuta or account.is_proton:
+        return None
+    if account.is_graph:
+        return _graph_sent_copy(credential, message_id)
+    with _pooled_session(account, credential) as session:
+        sent = mailbox_with_role(
+            (mailbox.name for mailbox in session.list_folders()),
+            FolderRole.SENT,
+        )
+        if sent is None:
+            return None
+        session.select(sent)
+        uids = session.search_message_id(message_id)
+        if not uids:
+            return None
+        return min(uids, key=int), session.uidvalidity()
+
+
+def _graph_sent_copy(
+    credential: Credential, message_id: str
+) -> tuple[str, None] | None:
+    escaped = message_id.replace("'", "''")
+    filtr = quote(f"internetMessageId eq '{escaped}'", safe="")
+    page = GraphSession(credential).get(
+        f"/me/messages?$filter={filtr}&$select=id&$top=1"
+    )
+    values = page.get("value", [])
+    if not values:
+        return None
+    return values[0]["id"], None
+
+
+def file_sent_email(
+    db: Database,
+    account: Account,
+    job: QueuedSend,
+    outcome: SendOutcome,
+    recipient: tuple[str, str],
+) -> tuple[Folder, bool]:
+    """File the local Sent copy of a mail known sent, then forget the queue.
+
+    server_id links the row to the server copy UIDPLUS reported; without one
+    the next sync still merges it by Message-ID. Returns the Sent folder and
+    whether its UIDVALIDITY changed -- and only then must the caller end the
+    jobs on its old UIDs, which single-flights the generation bump across
+    however many completions land together.
+    """
+    sent = sent_folder(db, account.id)
+    validity_changed = outcome.uidvalidity is not None and db.set_folder_uidvalidity(
+        sent.id, outcome.uidvalidity
+    )
+    if job.message_id:
+        db.delete_emails_by_message_id(sent.id, job.message_id)
+    name, address = recipient
+    row = db.save_email(
+        sent.id,
+        sender=account.email,
+        sender_address=account.email,
+        recipient=name,
+        recipient_address=address,
+        subject=job.subject,
+        preview=job.subject,
+        date=datetime.now().astimezone().isoformat(),
+        is_unread=False,
+        server_id=outcome.filed_uid,
+    )
+    db.save_raw_message(row.id, job.raw)
+    db.complete_outbox_email(job.email_id)
+    if row.id != job.email_id:
+        # A re-filing lands on the deleted Outbox row's id when the table is
+        # otherwise empty; deleting it then would take the copy just saved.
+        db.delete_email(job.email_id)
+    return sent, validity_changed
 
 
 # Cached because the sidebar classifies every folder of every account several
