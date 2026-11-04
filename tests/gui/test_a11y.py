@@ -506,12 +506,7 @@ def test_header_controls_have_accessible_names(tmp_path, monkeypatch):
                 names += 1
         assert names >= 14
 
-        for button in (
-            window.add_account_button,
-            window.online_accounts_button,
-            window.microsoft_button,
-        ):
-            assert button.get_label()
+        assert window.add_account_button.get_label()
     finally:
         _close_window(window, _db)
 

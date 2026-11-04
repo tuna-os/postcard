@@ -9,15 +9,14 @@ import shutil
 import subprocess
 from collections.abc import Callable
 
+from .auth import TOTP_LENGTH as TOTP_LENGTH
 from .auth import Credential
+from .auth import is_valid_totp as is_valid_totp
 
 MECHANISM_TUTA = "tuta-session"
 HELPER_NAME = "postcard-tuta"
 PROTOCOL_VERSION = 1
 HELPER_TIMEOUT_SECONDS = 100
-# A TOTP code is six ASCII digits; anything else is rejected without waking
-# the helper, which applies the same check before spending a login attempt.
-TOTP_LENGTH = 6
 # A helper reply is JSON whose bulk is base64 bodies and attachments -- ASCII,
 # so one character is one byte where the size actually matters. Checked before
 # json.loads, so an unbounded reply never pays for the parse and the copies
@@ -136,15 +135,6 @@ ERROR_CODES = frozenset(
         "unsupported_operation",
     }
 )
-
-
-def is_valid_totp(code: str) -> bool:
-    """Whether a code is worth a helper round trip: six ASCII digits.
-
-    `str.isdigit` alone is not enough -- it accepts non-ASCII numerals the
-    helper would reject after spending a login attempt.
-    """
-    return len(code) == TOTP_LENGTH and code.isascii() and code.isdigit()
 
 
 def login(

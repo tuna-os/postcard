@@ -48,7 +48,6 @@ _register_resources()
 
 import time
 
-from postcard.accounts_dialog import PostcardAccountsDialog
 from postcard.core.models.account import PROTOCOL_TUTA, TUTA_HOST
 from postcard.core.net.auth import Credential
 from postcard.core.net.tuta_session import MECHANISM_TUTA, TutaError
@@ -141,7 +140,34 @@ def test_custom_domain_addresses_sign_in_too(monkeypatch, tmp_path):
     db.close()
 
 
-def test_totp_challenge_retries_with_the_code(monkeypatch, tmp_path):
+def test_the_code_typed_on_the_form_goes_with_the_first_attempt(monkeypatch, tmp_path):
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
+    calls = []
+
+    def fake_login(email, password, totp=None):
+        calls.append(totp)
+        return CREDENTIAL
+
+    monkeypatch.setattr("postcard.tuta_dialog.tuta_session.login", fake_login)
+    monkeypatch.setattr(
+        "postcard.tuta_dialog.secrets.store_tuta_session",
+        lambda account_id, credential: None,
+    )
+    dialog = PostcardTutaDialog(db)
+    added = []
+    dialog.connect("account-added", lambda *args: added.append(True))
+    fill_form(dialog)
+    dialog.totp_row.set_text("001234")
+
+    dialog.sign_in_button.emit("clicked")
+    pump_main_loop_until(lambda: added)
+
+    assert calls == ["001234"]
+    assert len(db.accounts()) == 1
+    db.close()
+
+
+def test_a_missing_code_is_asked_for_on_the_same_form(monkeypatch, tmp_path):
     db = Database(str(tmp_path / "postcard.db"), key=_KEY)
     calls = []
 
@@ -162,11 +188,15 @@ def test_totp_challenge_retries_with_the_code(monkeypatch, tmp_path):
     fill_form(dialog)
 
     dialog.sign_in_button.emit("clicked")
-    pump_main_loop_until(lambda: dialog.dialog_stack.get_visible_child_name() == "totp")
+    pump_main_loop_until(
+        lambda: calls and dialog.dialog_stack.get_visible_child_name() == "form"
+    )
 
+    # The form kept what was typed; only the code is missing.
+    assert calls == [None]
+    assert dialog.email_row.get_text() == "ada@tuta.com"
     dialog.totp_row.set_text("001234")
-    assert dialog.totp_verify_button.get_sensitive()
-    dialog.totp_verify_button.emit("clicked")
+    dialog.sign_in_button.emit("clicked")
     pump_main_loop_until(lambda: added)
 
     assert calls == [None, "001234"]
@@ -174,48 +204,40 @@ def test_totp_challenge_retries_with_the_code(monkeypatch, tmp_path):
     db.close()
 
 
-def test_an_expired_code_stays_on_the_totp_page(monkeypatch, tmp_path):
+def test_an_expired_code_clears_the_row_for_retry(monkeypatch, tmp_path):
     db = Database(str(tmp_path / "postcard.db"), key=_KEY)
 
     def fake_login(email, password, totp=None):
-        if totp is None:
-            raise TutaError("second_factor_required")
         raise TutaError("invalid_totp")
 
     monkeypatch.setattr("postcard.tuta_dialog.tuta_session.login", fake_login)
     dialog = PostcardTutaDialog(db)
     fill_form(dialog)
-
-    dialog.sign_in_button.emit("clicked")
-    pump_main_loop_until(lambda: dialog.dialog_stack.get_visible_child_name() == "totp")
     dialog.totp_row.set_text("001234")
 
-    dialog.totp_verify_button.emit("clicked")
+    dialog.sign_in_button.emit("clicked")
     pump_main_loop_until(lambda: dialog.totp_row.get_text() == "")
 
-    assert dialog.dialog_stack.get_visible_child_name() == "totp"
+    assert dialog.dialog_stack.get_visible_child_name() == "form"
+    assert dialog.password_row.get_text() == "fixture-password"
     assert db.accounts() == []
     db.close()
 
 
-def test_a_rechallenge_after_an_attempt_keeps_the_totp_page(monkeypatch, tmp_path):
+def test_a_malformed_code_never_starts_login(monkeypatch, tmp_path):
     db = Database(str(tmp_path / "postcard.db"), key=_KEY)
 
-    def fake_login(email, password, totp=None):
-        raise TutaError("second_factor_required")
+    def fail(email, password, totp=None):
+        pytest.fail("login started with a malformed code")
 
-    monkeypatch.setattr("postcard.tuta_dialog.tuta_session.login", fake_login)
+    monkeypatch.setattr("postcard.tuta_dialog.tuta_session.login", fail)
     dialog = PostcardTutaDialog(db)
     fill_form(dialog)
+    dialog.totp_row.set_text("12")
 
     dialog.sign_in_button.emit("clicked")
-    pump_main_loop_until(lambda: dialog.dialog_stack.get_visible_child_name() == "totp")
-    dialog.totp_row.set_text("001234")
 
-    dialog.totp_verify_button.emit("clicked")
-    pump_main_loop_until(lambda: dialog.totp_row.get_text() == "")
-
-    assert dialog.dialog_stack.get_visible_child_name() == "totp"
+    assert dialog.dialog_stack.get_visible_child_name() == "form"
     assert db.accounts() == []
     db.close()
 
@@ -287,15 +309,4 @@ def test_an_existing_address_is_not_added_twice(monkeypatch, tmp_path):
 
     assert dialog.dialog_stack.get_visible_child_name() == "form"
     assert len(db.accounts()) == 1
-    db.close()
-
-
-def test_tuta_is_offered_from_the_accounts_dialog(tmp_path):
-    # No key gates the flow: the helper ships with the app, so the button is
-    # always up, unlike the OAuth ones.
-    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
-    dialog = PostcardAccountsDialog(db)
-
-    assert dialog.tuta_button.get_visible()
-
     db.close()

@@ -7,12 +7,15 @@ src/postcard/accounts_dialog.py
 src/postcard/application.py
 src/postcard/composer_window.py
 src/postcard/core/net/errors.py
+src/postcard/core/providers/catalog.py
 src/postcard/fastmail_dialog.py
 src/postcard/mail_sync.py
 src/postcard/message_view.py
 src/postcard/microsoft_dialog.py
 src/postcard/online_accounts_dialog.py
 src/postcard/preferences_dialog.py
+src/postcard/proton_dialog.py
+src/postcard/provider_dialog.py
 src/postcard/tray.py
 src/postcard/tuta_dialog.py
 src/postcard/window.py
@@ -24,5 +27,7 @@ src/ui/main-window.blp
 src/ui/microsoft-dialog.blp
 src/ui/online-accounts-dialog.blp
 src/ui/preferences-dialog.blp
+src/ui/proton-dialog.blp
+src/ui/provider-dialog.blp
 src/ui/shortcuts-dialog.blp
 src/ui/tuta-dialog.blp

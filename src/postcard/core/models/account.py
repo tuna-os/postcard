@@ -33,6 +33,10 @@ TUTA_PORT = 443
 FASTMAIL_HOST = "api.fastmail.com"
 FASTMAIL_PORT = 443
 
+# Same for Proton: the API origin the helper talks to, for error messages.
+PROTON_HOST = "api.proton.me"
+PROTON_PORT = 443
+
 
 def parse_port(text: str) -> int | None:
     """A port number from user input, or None when it isn't one.

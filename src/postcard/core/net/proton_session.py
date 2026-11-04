@@ -27,6 +27,7 @@ import subprocess
 from collections.abc import Callable
 
 from .auth import Credential
+from .auth import is_valid_totp as is_valid_totp
 
 MECHANISM_PROTON = "proton-session"
 HELPER_NAME = "postcard-proton"
@@ -60,6 +61,11 @@ ERROR_CODES = frozenset(
 )
 
 Transport = Callable[[dict], dict]
+
+
+def helper_available() -> bool:
+    """Whether the native helper is installed: the picker's Proton gate."""
+    return shutil.which(HELPER_NAME) is not None
 
 
 def helper_transport(request: dict) -> dict:

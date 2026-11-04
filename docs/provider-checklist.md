@@ -33,6 +33,11 @@ and `registry.py` (dispatch, trust, discovery).
 4. If accounts are stored under the new protocol, keep the old path working
    until stored accounts migrate -- see `_JmapDriver`, which serves `jmap`
    accounts over IMAP without pretending to be a JMAP implementation.
+5. Onboard it through the picker: an entry in `catalog.py` (OAuth first, so
+   the app never sees the password), a badge in `src/icons/scalable/providers/`,
+   and a dialog mapped in `provider_dialog._DIALOGS`. A flow that cannot
+   complete yet (unregistered OAuth client, unshipped helper) renders as a
+   gated row with its reason, never a hidden one.
 
 ## Adding an external add-on
 

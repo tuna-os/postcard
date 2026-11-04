@@ -15,7 +15,7 @@ from . import goa
 from .models.account import Account
 from .net import ms_oauth
 from .net.auth import Credential
-from .net.proton_session import MECHANISM_PROTON
+from .net.proton_session import MECHANISM_PROTON, ProtonError
 from .net.tuta_session import MECHANISM_TUTA, TutaError
 from .store.database import CacheError
 
@@ -71,6 +71,25 @@ def store_tuta_session(account_id: int, credential: Credential) -> None:
         raise TutaError("invalid_request") from None
     if not isinstance(session, dict) or not isinstance(session.get("login"), str):
         raise TutaError("invalid_request")
+    store_password(account_id, credential.secret)
+
+
+def store_proton_session(account_id: int, credential: Credential) -> None:
+    """Store a resumable Proton session in the keyring.
+
+    Same contract as the Tuta side: only a session the helper returned,
+    never the account password. The login check mirrors
+    ``proton_session.login`` so a session issued for another address cannot
+    be stored under this one.
+    """
+    if credential.mechanism != MECHANISM_PROTON:
+        raise ProtonError("invalid_request")
+    try:
+        session = json.loads(credential.secret)
+    except ValueError:
+        raise ProtonError("invalid_request") from None
+    if not isinstance(session, dict) or not isinstance(session.get("login"), str):
+        raise ProtonError("invalid_request")
     store_password(account_id, credential.secret)
 
 

@@ -21,3 +21,17 @@ class Credential(NamedTuple):
 def xoauth2_response(user: str, access_token: str) -> str:
     """The SASL XOAUTH2 initial response (RFC 7628), before base64."""
     return f"user={user}\x01auth=Bearer {access_token}\x01\x01"
+
+
+# A TOTP code is six ASCII digits; anything else is rejected without waking
+# the helper, which applies the same check before spending a login attempt.
+TOTP_LENGTH = 6
+
+
+def is_valid_totp(code: str) -> bool:
+    """Whether a code is worth a helper round trip: six ASCII digits.
+
+    `str.isdigit` alone is not enough -- it accepts non-ASCII numerals the
+    helper would reject after spending a login attempt.
+    """
+    return len(code) == TOTP_LENGTH and code.isascii() and code.isdigit()
