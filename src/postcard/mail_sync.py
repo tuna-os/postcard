@@ -18,6 +18,7 @@ from .core.compose import extract_recipients, rotate_message_id
 from .core.lifecycle import Lifecycle
 from .core.mime.message_parser import clock_format
 from .core.models.account import (
+    FASTMAIL_HOST,
     PROTOCOL_GRAPH,
     PROTOCOL_IMAP,
     PROTOCOL_JMAP,
@@ -36,9 +37,12 @@ from .core.net import (
     graph_folders,
     graph_messages,
     graph_send,
+    jmap_folders,
+    jmap_messages,
     tuta_messages,
 )
 from .core.net.auth import Credential
+from .core.net.fastmail_oauth import FASTMAIL_JMAP_SESSION_URL
 from .core.net.graph_session import GraphSession
 from .core.net.imap_session import (
     ATTR_NOSELECT,
@@ -50,6 +54,17 @@ from .core.net.imap_session import (
     MailboxInfo,
     UidValidityError,
     decode_mailbox_name,
+)
+from .core.net.jmap_session import (
+    CODE_HTTP,
+    CODE_NO_SUBMISSION,
+    CODE_READ_ONLY,
+    CODE_UNCERTAIN_SUBMISSION,
+    JmapError,
+    JmapSession,
+    Session,
+    discover,
+    needs_full_sync,
 )
 from .core.net.proton_session import ProtonError
 from .core.net.smtp_session import SmtpSession
@@ -159,6 +174,43 @@ _graph_states: dict[int, _GraphState] = {}
 def _graph_state(account_id: int) -> _GraphState:
     with _pool_lock:
         return _graph_states.setdefault(account_id, _GraphState())
+
+
+@dataclass(frozen=True)
+class _JmapQuery:
+    """One folder's id snapshot plus the query state that brings it up to
+    date. Replaced wholesale, only after the fetch that produced it lands."""
+
+    state: str
+    ids: frozenset[str]
+
+
+@dataclass
+class _JmapState:
+    """What a JMAP account keeps between operations, in place of a connection.
+
+    JMAP is stateless HTTP, so there is nothing to pool -- but discovery is
+    one round trip saved by keeping the session, and a stored state token
+    turns the next pass over a folder into a request for what changed instead
+    of a walk over all of it. A restart drops all of this and the next sync
+    walks everything over, which stays correct because every snapshot it
+    builds is still authoritative.
+    """
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    session: Session | None = None
+    mailbox_state: str | None = None
+    mailboxes: dict[str, jmap_folders.JmapMailbox] = field(default_factory=dict)
+    queries: dict[str, _JmapQuery] = field(default_factory=dict)
+
+
+# Guarded by _pool_lock, like the IMAP pool it sits beside.
+_jmap_states: dict[int, _JmapState] = {}
+
+
+def _jmap_state(account_id: int) -> _JmapState:
+    with _pool_lock:
+        return _jmap_states.setdefault(account_id, _JmapState())
 
 
 # RFC 2177 lets a server drop an IDLE left running for 30 minutes, so it is
@@ -409,8 +461,10 @@ def close_sessions(account_id: int | None = None) -> None:
         watchers = [_watchers.pop(one) for one in watcher_ids if one in _watchers]
         if account_id is None:
             _graph_states.clear()
+            _jmap_states.clear()
         else:
             _graph_states.pop(account_id, None)
+            _jmap_states.pop(account_id, None)
         for one in ids:
             _discard_pooled(one)
     for watcher in watchers:
@@ -427,6 +481,25 @@ def _discard_pooled(account_id: int) -> None:
     if entry is not None:
         entry.session = None
         entry.generation += 1
+
+
+def _jmap_session_url(account: Account) -> str:
+    """Where this account's JMAP session resource lives."""
+    if account.imap_host == FASTMAIL_HOST:
+        return FASTMAIL_JMAP_SESSION_URL
+    return f"https://{account.imap_host}/.well-known/jmap"
+
+
+def _jmap_open(
+    account: Account, credential: Credential, *, writable: bool = False
+) -> JmapSession:
+    """A JMAP session for one operation: discovery cached per account, the
+    credential bound fresh each time."""
+    state = _jmap_state(account.id)
+    session = state.session
+    if session is None:
+        session = state.session = discover(_jmap_session_url(account), credential)
+    return JmapSession(session, credential, writable=writable)
 
 
 # Every window's job generations. Weak so a closed window stops hearing about
@@ -479,6 +552,10 @@ _TUTA_CAPABILITIES = frozenset(
         Capability.MOVE,
     }
 )
+
+# Everything but push: watch_push stays a part-2 primitive until a watcher
+# owns it, so JMAP accounts poll their inbox like Graph ones.
+_JMAP_CAPABILITIES = _GRAPH_CAPABILITIES
 
 
 def _succeeded(uids: Iterable[str]) -> tuple[PerIdOutcome, ...]:
@@ -717,19 +794,16 @@ class _ProtonDriver(ProviderDriver):
 
 
 class _JmapDriver(ProviderDriver):
-    """JMAP accounts, served over IMAP until a native JMAP driver lands.
+    """JMAP accounts, synced natively over the part-2 JMAP backend.
 
-    Fastmail stores PROTOCOL_JMAP but syncs through the IMAP path today; this
-    driver keeps that behaviour while giving those accounts their own stable
-    id and descriptor. It is delegation, not a JMAP implementation.
+    Like Graph, folders are addressed by opaque id and message ids are
+    immutable, so there is no UIDVALIDITY to check; unlike Graph, the sync
+    keeps per-folder query states and only walks what changed.
     """
 
     _descriptor = ProviderDescriptor(
-        id=PROTOCOL_JMAP, display_name="JMAP", capabilities=_IMAP_CAPABILITIES
+        id=PROTOCOL_JMAP, display_name="JMAP", capabilities=_JMAP_CAPABILITIES
     )
-
-    def __init__(self) -> None:
-        self._imap = _ImapDriver()
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -738,32 +812,51 @@ class _JmapDriver(ProviderDriver):
     def fetch_mailbox(
         self, account: Account, credential: Credential, request: FetchRequest
     ) -> SyncResult:
-        return self._imap.fetch_mailbox(account, credential, request)
+        return _fetch_jmap_mailbox(
+            account,
+            credential,
+            request.folder,
+            request.limit,
+            request.offset,
+            request.should_count_unread,
+        )
 
     def fetch_full_message(
         self, account: Account, credential: Credential, request: MessageRequest
     ) -> bytes:
-        return self._imap.fetch_full_message(account, credential, request)
+        return _fetch_jmap_message(account, credential, request.uid)
 
     def set_flags(
         self, account: Account, credential: Credential, request: FlagRequest
     ) -> tuple[PerIdOutcome, ...]:
-        return self._imap.set_flags(account, credential, request)
+        if not request.uids:
+            return ()
+        return _set_jmap_flags(
+            account, credential, request.uids, request.flag, request.should_add
+        )
 
     def move(
         self, account: Account, credential: Credential, request: MoveRequest
     ) -> MoveResult:
-        return self._imap.move(account, credential, request)
+        return _move_jmap_messages(
+            account, credential, request.folder_name, request.uids, request.destination
+        )
 
     def send(
         self, account: Account, credential: Credential, request: SendRequest
     ) -> SendOutcome:
-        return self._imap.send(account, credential, request)
+        return _send_jmap_message(
+            account,
+            credential,
+            request.from_addr,
+            list(request.recipients),
+            request.raw,
+        )
 
     def sent_copy(
         self, account: Account, credential: Credential, message_id: str
     ) -> tuple[str, int | None] | None:
-        return self._imap.sent_copy(account, credential, message_id)
+        return _jmap_sent_copy(account, credential, message_id)
 
 
 def register_builtin_drivers(registry: ProviderRegistry) -> None:
@@ -1022,6 +1115,114 @@ def _fetch_graph_mailbox(
     )
 
 
+def _fetch_jmap_mailbox(
+    account: Account,
+    credential: Credential,
+    folder: str | None,
+    limit: int,
+    offset: int,
+    should_count_unread: bool,
+) -> SyncResult:
+    """fetch_mailbox for a JMAP account, where a folder's name is its id."""
+    jmap = _jmap_open(account, credential)
+    state = _jmap_state(account.id)
+    # Held across the requests: two syncs of one folder racing would each
+    # apply the same changes to a stale copy and lose the other's cursor.
+    with state.lock:
+        mailboxes = _jmap_mailboxes(jmap, state)
+        target = folder or next(
+            (box.id for box in mailboxes if box.role is FolderRole.INBOX), ""
+        )
+        exists = next((box.total for box in mailboxes if box.id == target), 0)
+        if offset == 0:
+            messages, all_uids = _jmap_newest(jmap, state, target, limit)
+        else:
+            page = jmap_messages.query_page(jmap, target, offset, limit)
+            found, _missing = jmap_messages.fetch_emails(jmap, list(page.ids))
+            messages = [jmap_messages.message_header(item) for item in found]
+            all_uids = None
+
+    # Free here, unlike IMAP: every mailbox's count came with the listing.
+    counts = {
+        box.id: box.unread
+        for box in mailboxes
+        if should_count_unread
+        and offset == 0
+        and box.id != target
+        and box.role is not FolderRole.OTHER
+    }
+    return SyncResult(
+        folders=[
+            MailboxInfo(
+                box.id, "", "", label=box.name, role=box.role, parent=box.parent_id
+            )
+            for box in mailboxes
+        ],
+        messages=messages,
+        folder=target,
+        exists=exists,
+        offset=offset,
+        all_uids=all_uids,
+        unread_counts=counts,
+    )
+
+
+def _jmap_mailboxes(
+    jmap: JmapSession, state: _JmapState
+) -> list[jmap_folders.JmapMailbox]:
+    """Every mailbox, refreshed through the stored Mailbox state when there is
+    one. Caller holds the state lock; the cursor moves only on success."""
+    if state.mailbox_state is not None:
+        try:
+            delta = jmap_folders.mailbox_changes(jmap, state.mailbox_state)
+        except JmapError as error:
+            if not needs_full_sync(error):
+                raise
+        else:
+            for gone in delta.destroyed_ids:
+                state.mailboxes.pop(gone, None)
+            for box in delta.changed:
+                state.mailboxes[box.id] = box
+            state.mailbox_state = delta.new_state
+            return list(state.mailboxes.values())
+    boxes = jmap_folders.list_mailboxes(jmap)
+    state.mailboxes = {box.id: box for box in boxes}
+    state.mailbox_state = jmap_folders.current_mailbox_state(jmap)
+    return list(state.mailboxes.values())
+
+
+def _jmap_newest(
+    jmap: JmapSession, state: _JmapState, target: str, limit: int
+) -> tuple[list[MessageHeader], set[str]]:
+    """The newest page plus whatever entered since, and the authoritative id
+    set behind it. Caller holds the state lock; the cursor moves only after
+    every fetch below lands."""
+    cursor = state.queries.get(target)
+    if cursor is not None:
+        try:
+            changed = jmap_messages.query_changes(jmap, target, cursor.state)
+        except JmapError as error:
+            if not needs_full_sync(error):
+                raise
+        else:
+            # A delta only names what entered or left, so the newest page is
+            # re-read beside it: that is what picks up a flag flipped on
+            # another client, the way the IMAP and Graph syncs do.
+            page = jmap_messages.query_page(jmap, target, 0, limit)
+            wanted = list(dict.fromkeys([*page.ids, *changed.ids]))
+            found, missing = jmap_messages.fetch_emails(jmap, wanted)
+            kept = (set(cursor.ids) - set(changed.removed_ids) - set(missing)) | set(
+                changed.ids
+            )
+            state.queries[target] = _JmapQuery(changed.query_state, frozenset(kept))
+            return [jmap_messages.message_header(item) for item in found], kept
+    walked = jmap_messages.query_all_ids(jmap, target)
+    found, _missing = jmap_messages.fetch_emails(jmap, walked.ids[:limit])
+    full = set(walked.ids)
+    state.queries[target] = _JmapQuery(walked.query_state, frozenset(full))
+    return [jmap_messages.message_header(item) for item in found], full
+
+
 def _to_message_header(fetched: FetchedHeader) -> MessageHeader:
     """Turn raw wire headers into the display-ready form.
 
@@ -1072,6 +1273,12 @@ def _fetch_imap_message(
     with _pooled_session(account, credential) as session:
         _select(session, folder_name, uidvalidity, is_readonly=True)
         return session.fetch_message(uid)
+
+
+def _fetch_jmap_message(account: Account, credential: Credential, uid: str) -> bytes:
+    """One message's bytes. JMAP ids are account-wide and immutable, so there
+    is no folder to open and no UIDVALIDITY to check."""
+    return jmap_messages.fetch_mime(_jmap_open(account, credential), uid)
 
 
 def server_uids(mails: Iterable[Email]) -> list[str]:
@@ -1131,6 +1338,29 @@ def _set_imap_flags(
     return tuple(PerIdOutcome(uid, True) for uid in uids)
 
 
+def _set_jmap_flags(
+    account: Account,
+    credential: Credential,
+    uids: Sequence[str],
+    flag: str,
+    should_add: bool,
+) -> tuple[PerIdOutcome, ...]:
+    """Add or remove one flag on every id. A refusal raises rather than
+    reporting a quiet failure the caller would never show."""
+    result = jmap_messages.set_flag(
+        _jmap_open(account, credential, writable=True), list(uids), flag, should_add
+    )
+    for uid in uids:
+        if uid in result.errors:
+            refusal = result.errors[uid]
+            raise JmapError(
+                0,
+                refusal.code,
+                f"could not set {flag} on {uid}: {refusal.message}",
+            )
+    return _succeeded(uids)
+
+
 def move_messages(
     account: Account,
     credential: Credential,
@@ -1173,6 +1403,40 @@ def _move_imap_messages(
                     _discard_pooled(account.id)
                 return MoveResult(destination_uids, index, error)
     return MoveResult(destination_uids)
+
+
+def _move_jmap_messages(
+    account: Account,
+    credential: Credential,
+    folder_name: str,
+    uids: Sequence[str],
+    destination: str,
+) -> MoveResult:
+    """Move every id to another mailbox. A move keeps the id -- only the
+    mailbox membership changes -- and the result stops at the first id the
+    server refused, which is what the window restores from."""
+    result = jmap_messages.move_emails(
+        _jmap_open(account, credential, writable=True),
+        list(uids),
+        [destination],
+        [folder_name],
+    )
+    applied = set(result.updated)
+    moved = MoveResult()
+    for index, uid in enumerate(uids):
+        refusal = result.errors.get(uid)
+        if refusal is not None:
+            moved.failed_index = index
+            moved.error = JmapError(
+                0, refusal.code, f"could not move {uid}: {refusal.message}"
+            )
+            break
+        if uid not in applied:
+            moved.failed_index = index
+            moved.error = JmapError(0, CODE_HTTP, f"Email/set answered without {uid}")
+            break
+        moved.destination_uids.append(uid)
+    return moved
 
 
 def send_message(
@@ -1233,6 +1497,80 @@ def _send_imap_message(
         return SendOutcome(None, None, None)
     uidvalidity, uid = filed
     return SendOutcome(uid, uidvalidity, None)
+
+
+def _send_jmap_message(
+    account: Account,
+    credential: Credential,
+    from_addr: str,
+    recipients: list[str],
+    raw: bytes,
+) -> SendOutcome:
+    """Upload the finished message, save it as a draft, and submit it. The
+    server files the Sent copy itself, so there is nothing to append.
+
+    An uncertain submission is settled by looking at where the draft ended up
+    -- never by submitting again, which could send it twice. When that cannot
+    prove the mail went out, the attempt fails and the Outbox's own Sent check
+    guards the retry.
+    """
+    jmap = _jmap_open(account, credential, writable=True)
+    if not jmap.submission_supported:
+        raise JmapError(0, CODE_NO_SUBMISSION, "the server offers no EmailSubmission")
+    if not jmap.is_writable:
+        raise JmapError(0, CODE_READ_ONLY, "this account is read-only")
+    boxes = jmap_folders.list_mailboxes(jmap)
+    drafts = next((box.id for box in boxes if box.role is FolderRole.DRAFTS), None)
+    if drafts is None:
+        raise JmapError(0, CODE_HTTP, "the account has no drafts mailbox")
+    sent = next((box.id for box in boxes if box.role is FolderRole.SENT), None)
+    blob = jmap.upload_blob(raw, "message/rfc822")
+    created = jmap_messages.create_emails(
+        jmap, {"postcard": {"blobId": blob, "mailboxIds": {drafts: True}}}
+    )
+    refusal = created.errors.get("postcard")
+    if refusal is not None:
+        raise JmapError(0, refusal.code, f"could not save the draft: {refusal.message}")
+    echo = created.created.get("postcard", {})
+    email_id = echo.get("id")
+    if not isinstance(email_id, str) or not email_id:
+        raise JmapError(0, CODE_HTTP, "Email/set answered without a draft id")
+    submitted = jmap_messages.submit_email(
+        jmap,
+        jmap_messages.SubmitRequest(
+            email_id,
+            envelope={
+                "mailFrom": {"email": from_addr},
+                "rcptTo": [
+                    {"email": address} for address in _envelope_addresses(recipients)
+                ],
+            },
+        ),
+    )
+    if submitted.error is not None:
+        raise JmapError(
+            0,
+            submitted.error.code,
+            f"the server refused the message: {submitted.error.message}",
+        )
+    if submitted.is_uncertain:
+        settled = sent is not None and jmap_messages.resolve_uncertain_submission(
+            jmap, email_id, sent
+        )
+        if settled is True:
+            return SendOutcome(None, None, None)
+        raise JmapError(
+            0,
+            CODE_UNCERTAIN_SUBMISSION,
+            "could not confirm the message was sent",
+        )
+    return SendOutcome(None, None, None)
+
+
+def _envelope_addresses(recipients: list[str]) -> list[str]:
+    """Bare addresses for the submission envelope: the composer hands over
+    display names with them, while rcptTo wants addresses alone."""
+    return [address for _name, address in getaddresses(recipients) if address]
 
 
 class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
@@ -1452,6 +1790,15 @@ def _graph_sent_copy(
     if not values:
         return None
     return values[0]["id"], None
+
+
+def _jmap_sent_copy(
+    account: Account, credential: Credential, message_id: str
+) -> tuple[str, None] | None:
+    found = jmap_messages.find_by_message_id(
+        _jmap_open(account, credential), message_id
+    )
+    return (found, None) if found is not None else None
 
 
 def file_sent_email(
