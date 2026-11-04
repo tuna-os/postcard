@@ -7,6 +7,7 @@ src/postcard/accounts_dialog.py
 src/postcard/application.py
 src/postcard/composer_window.py
 src/postcard/core/net/errors.py
+src/postcard/fastmail_dialog.py
 src/postcard/mail_sync.py
 src/postcard/message_view.py
 src/postcard/microsoft_dialog.py
@@ -17,6 +18,7 @@ src/postcard/window.py
 src/ui/account-dialog.blp
 src/ui/accounts-dialog.blp
 src/ui/composer-window.blp
+src/ui/fastmail-dialog.blp
 src/ui/main-window.blp
 src/ui/microsoft-dialog.blp
 src/ui/online-accounts-dialog.blp

@@ -12,11 +12,13 @@ MAX_PORT = 65535
 
 # How an account's mail is reached. IMAP/SMTP is everything typed in by hand
 # and Google; Microsoft 365 hands out a token that only opens the Graph API;
-# Tuta and Proton speak their own HTTPS APIs through a native helper.
+# Tuta and Proton speak their own HTTPS APIs through a native helper; JMAP is
+# Fastmail over OAuth, synced through the JMAP session.
 PROTOCOL_IMAP = "imap"
 PROTOCOL_GRAPH = "graph"
 PROTOCOL_TUTA = "tuta"
 PROTOCOL_PROTON = "proton"
+PROTOCOL_JMAP = "jmap"
 
 # What a Graph account stores in the host/port columns, which predate it and are
 # NOT NULL. Error messages name the host, so it is the real one.
@@ -26,6 +28,10 @@ GRAPH_PORT = 443
 # Same for Tuta: the API endpoint the helper talks to, for error messages.
 TUTA_HOST = "app.tuta.com"
 TUTA_PORT = 443
+
+# Same for Fastmail: the API origin OAuth and JMAP both talk to.
+FASTMAIL_HOST = "api.fastmail.com"
+FASTMAIL_PORT = 443
 
 
 def parse_port(text: str) -> int | None:
@@ -91,14 +97,24 @@ class Account(GObject.Object):
         return self.protocol == PROTOCOL_GRAPH
 
     @property
+    def is_jmap(self) -> bool:
+        return self.protocol == PROTOCOL_JMAP
+
+    @property
     def is_pushless(self) -> bool:
         """Whether this account's inbox can only be polled, never watched.
 
-        IMAP IDLE holds a connection open on the inbox; Graph, Tuta and Proton
-        offer no push channel a desktop client can hold, so the watcher polls
-        instead. One predicate so the next protocol cannot be forgotten there.
+        IMAP IDLE holds a connection open on the inbox; Graph, Tuta, Proton
+        and JMAP offer no push channel a desktop client can hold, so the
+        watcher polls instead. JMAP has an EventSource, but nothing holds it
+        yet. One predicate so the next protocol cannot be forgotten there.
         """
-        return self.protocol in (PROTOCOL_GRAPH, PROTOCOL_TUTA, PROTOCOL_PROTON)
+        return self.protocol in (
+            PROTOCOL_GRAPH,
+            PROTOCOL_TUTA,
+            PROTOCOL_PROTON,
+            PROTOCOL_JMAP,
+        )
 
     @property
     def short_label(self) -> str:
