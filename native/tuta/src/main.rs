@@ -613,9 +613,12 @@ async fn message(sdk: Arc<LoggedInSdk>, mail_id: String) -> Result<Value> {
 }
 /// Best-effort recipient classification: (internal, external) counts, or None
 /// when a lookup failed for any reason other than "no key". Internal means
-/// the public-key service holds a key for the address -- the same rule the
-/// official client resolves recipient types by. Ordinary delivery needs no
-/// keys, so a failed lookup never fails the send; the counts stay unknown.
+/// the public-key service holds a key for the address, which is the
+/// authoritative half of the official client's rule (RecipientsModel also
+/// treats its own domains as internal without a lookup; the counts are
+/// informational only, so key presence alone is enough here). Ordinary
+/// delivery needs no keys, so a failed lookup never fails the send; the
+/// counts stay unknown.
 async fn classify_recipients(sdk: &LoggedInSdk, addresses: &[String]) -> Option<(usize, usize)> {
     let mut internal = 0;
     let mut external = 0;
@@ -731,6 +734,10 @@ fn ordinary_send_payload(
         mailSessionKey: Some(mail_session_key.clone()),
         bucketEncMailSessionKey: None,
         senderNameUnencrypted: None,
+        // Plaintext stays off in both copies: the official client reads the
+        // account's sendPlaintextOnly property, but Postcard has no such
+        // setting and always composes HTML, so the flag matches the content
+        // rather than a server-side switch the user cannot see here.
         plaintext: false,
         calendarMethod: false,
         sessionEncEncryptionAuthStatus: None,

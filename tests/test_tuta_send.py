@@ -21,7 +21,7 @@ from postcard.core.models.account import (
     Account,
 )
 from postcard.core.models.attachment import Attachment
-from postcard.core.net import tuta_messages
+from postcard.core.net import errors, tuta_messages
 from postcard.core.net.auth import Credential
 from postcard.core.net.imap_session import FLAG_FLAGGED, FLAG_SEEN
 from postcard.core.net.tuta_session import MECHANISM_TUTA, TutaError
@@ -510,3 +510,14 @@ def test_a_forwarded_message_attachment_travels_as_bytes():
     (attachment,) = captured["attachments"]
     assert attachment["mime_type"] == "message/rfc822"
     assert b"original body" in base64.b64decode(attachment["data"])
+
+
+def test_an_uncertain_send_reports_uncertainty_not_a_retry():
+    # The Outbox drain banner classifies its errors: an uncertain send must
+    # name the risk, never read as a plain failure to try again.
+    is_auth, message = errors.classify(TutaError("send_uncertain"), "app.tuta.com")
+    assert not is_auth
+    assert "may have been sent" in message
+    assert "Check Sent" in message
+    _is_auth, definitive = errors.classify(TutaError("send_failed"), "app.tuta.com")
+    assert message != definitive

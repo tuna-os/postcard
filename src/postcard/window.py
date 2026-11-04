@@ -41,6 +41,7 @@ from .core.models.conversation import Conversation
 from .core.models.email import Email
 from .core.models.folder import Folder
 from .core.net import errors, imap_session, ms_oauth, smtp_session
+from .core.net.tuta_session import TutaError
 from .core.store.database import Database, OutboxState, QueuedSend
 from .folder_row import FolderRow
 from .message_view import LoadCallback, MessageView
@@ -2821,8 +2822,22 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         retry sends to them only; anything else fails the attempt as before.
         A partial refusal -- some recipients already got it -- also gets a
         toast saying so and what happens next, since the drain banner's
-        "couldn't send" would otherwise read as nothing going out.
+        "couldn't send" would otherwise read as nothing going out. An
+        ambiguous send is terminal-failed instead of retried: it may have
+        gone out, so another attempt could deliver it twice.
         """
+        if isinstance(error, TutaError) and error.code == "send_uncertain":
+            # The mail may have gone out: terminal-fail it for a human to
+            # check Sent instead of queueing an automatic retry that could
+            # deliver it twice. The Outbox keeps it, visibly failed.
+            self._db.fail_outbox_email(email_id, str(error), OutboxState.FAILED)
+            self._toast(
+                _(
+                    "A message may have been sent. "
+                    "Check Sent before trying again. Kept in the Outbox."
+                )
+            )
+            return
         if not isinstance(error, smtp_session.SmtpRefusedError):
             mail_sync.fail_queued_send(self._db, email_id, str(error))
             return
