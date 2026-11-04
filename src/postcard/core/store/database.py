@@ -18,6 +18,7 @@ except ImportError:
     _sqlcipher = None
 
 from .. import threader
+from ..compose import Envelope
 from ..models.account import (
     PROTOCOL_IMAP,
     SECURITY_STARTTLS,
@@ -146,6 +147,10 @@ MIGRATIONS = [
         envelope TEXT NOT NULL DEFAULT '[]'
     );
     """,
+    # The envelope a draft was addressed with -- To/Cc/Bcc as JSON -- so a
+    # reopen restores Bcc, which the stored message must never name. Empty
+    # for received mail and for drafts saved before this column existed.
+    "ALTER TABLE emails ADD COLUMN envelope TEXT NOT NULL DEFAULT ''",
 ]
 
 
@@ -858,13 +863,14 @@ class Database:
         sender_address: str = "",
         recipient: str = "",
         recipient_address: str = "",
+        envelope: Envelope | None = None,
     ) -> Email:
         cursor = self._conn.execute(
             """
             INSERT INTO emails
                 (folder_id, server_id, sender, subject, preview, date, unread,
-                 sender_address, recipient, recipient_address)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 sender_address, recipient, recipient_address, envelope)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 folder_id,
@@ -877,6 +883,7 @@ class Database:
                 sender_address,
                 recipient,
                 recipient_address,
+                json.dumps(envelope) if envelope is not None else "",
             ),
         )
         self._conn.commit()
@@ -884,6 +891,34 @@ class Database:
             "SELECT * FROM emails WHERE id = ?", (cursor.lastrowid,)
         ).fetchone()
         return self._email_from_row(row)
+
+    def draft_envelope(self, email_id: int) -> Envelope | None:
+        """The envelope a draft was addressed with, or None when none was kept.
+
+        Received mail and drafts saved before the envelope column carry no
+        envelope; their Bcc is unrecoverable, since the MIME never names it.
+        A malformed value reads as missing rather than breaking the reopen.
+        """
+        row = self._conn.execute(
+            "SELECT envelope FROM emails WHERE id = ?", (email_id,)
+        ).fetchone()
+        if row is None or not row["envelope"]:
+            return None
+        try:
+            stored = json.loads(row["envelope"])
+        except ValueError:
+            return None
+        if not isinstance(stored, dict):
+            return None
+        lists: dict[str, list[str]] = {}
+        for key in ("to", "cc", "bcc"):
+            values = stored.get(key, [])
+            if not isinstance(values, list) or any(
+                not isinstance(addr, str) for addr in values
+            ):
+                return None
+            lists[key] = values
+        return Envelope(to=lists["to"], cc=lists["cc"], bcc=lists["bcc"])
 
     def save_incoming_email(self, folder_id: int, header: MessageHeader) -> bool:
         """Insert one fetched email, or update the flags of one we already have.

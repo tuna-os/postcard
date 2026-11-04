@@ -5,9 +5,12 @@ from dataclasses import dataclass
 from email.message import EmailMessage, Message
 from html import escape
 from html.parser import HTMLParser
+from typing import TypedDict
 from urllib.parse import unquote
 
+from .mime.message_parser import parse_message
 from .models.attachment import Attachment
+from .threader import NO_SUBJECT
 
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 _BLOCK_TAGS = {"p", "div", "br", "li", "tr", "blockquote", "pre"} | _HEADINGS
@@ -197,6 +200,78 @@ def extract_recipients(raw: bytes) -> list[str]:
         [str(headers["To"] or ""), str(headers["Cc"] or "")]
     )
     return [addr for _, addr in addrs if addr]
+
+
+class Envelope(TypedDict):
+    """To/Cc/Bcc as bare delivery addresses, stored beside the message.
+
+    The transmitted MIME must never name Bcc, so the envelope is the only
+    place a Bcc recipient survives a queue, a draft, or a restart.
+    """
+
+    to: list[str]
+    cc: list[str]
+    bcc: list[str]
+
+
+def normalize_addresses(text: str) -> list[str]:
+    """One recipient row as bare addresses, display names parsed off.
+
+    A comma split would hand "Ada <ada@example.com>" to the SMTP envelope
+    whole; getaddresses keeps the address alone. Empties dropped, first-seen
+    order kept, repeats folded.
+    """
+    addrs = [
+        addr.strip() for _name, addr in email.utils.getaddresses([text]) if addr.strip()
+    ]
+    return list(dict.fromkeys(addrs))
+
+
+def build_envelope(to: str, cc: str, bcc: str) -> Envelope:
+    """The composer recipient rows as a normalized envelope, Bcc kept apart."""
+    return {
+        "to": normalize_addresses(to),
+        "cc": normalize_addresses(cc),
+        "bcc": normalize_addresses(bcc),
+    }
+
+
+def flatten_envelope(envelope: Envelope) -> list[str]:
+    """Every delivery address, To first: the SMTP RCPT list, queue order."""
+    return list(dict.fromkeys(envelope["to"] + envelope["cc"] + envelope["bcc"]))
+
+
+@dataclass(frozen=True)
+class ReopenedDraft:
+    """The composer fields a saved draft restores."""
+
+    to: str = ""
+    cc: str = ""
+    bcc: str = ""
+    subject: str = ""
+    body_html: str = ""
+    attachments: tuple[Attachment, ...] = ()
+
+
+def reopen_draft(raw: bytes, envelope: Envelope | None) -> ReopenedDraft:
+    """Rebuild the composer fields a saved draft was written from.
+
+    To/Cc come from the message's own headers, which keep display names; Bcc
+    comes only from the stored envelope, never from the MIME -- which must not
+    name it, so parsing it there would find nothing. A draft saved with no
+    subject reads back as "", not the "(no subject)" the drafts list shows.
+    """
+    parsed = parse_message(raw)
+    subject = "" if parsed.subject.lower() == NO_SUBJECT else parsed.subject
+    bcc = ", ".join(envelope["bcc"]) if envelope is not None else ""
+    return ReopenedDraft(
+        to=", ".join(parsed.to),
+        cc=", ".join(parsed.cc),
+        bcc=bcc,
+        subject=subject,
+        body_html=parsed.html_body or to_html(parsed.text_body or ""),
+        attachments=tuple(parsed.attachments),
+    )
 
 
 @dataclass(frozen=True)
