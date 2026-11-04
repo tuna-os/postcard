@@ -48,12 +48,13 @@ ALL = frozenset(Capability)
             ),
         ),
         (PROTOCOL_PROTON, frozenset()),
-        (PROTOCOL_JMAP, ALL),
+        (PROTOCOL_JMAP, ALL - {Capability.IDLE_PUSH}),
     ],
 )
 def test_builtin_capabilities(protocol, capabilities):
     """The matrix the UI disables actions from. Proton has none: every one of
-    its operations raises unsupported_operation."""
+    its operations raises unsupported_operation. JMAP has all but push: its
+    event source stays a part-2 primitive until a watcher owns it."""
     registry = ProviderRegistry()
     mail_sync.register_builtin_drivers(registry)
 

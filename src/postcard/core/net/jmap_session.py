@@ -65,6 +65,8 @@ CODE_INVALID_ARGUMENTS = "invalidArguments"
 CODE_UNSUPPORTED_CREDENTIAL = "unsupportedCredential"
 CODE_NO_SUBMISSION = "submissionUnsupported"
 CODE_PUSH_FAILED = "pushUnavailable"
+CODE_NOT_FOUND = "notFound"
+CODE_UNCERTAIN_SUBMISSION = "uncertainSubmission"
 
 # A stored state token the server no longer honours: the only way on is a
 # full walk, never applying the failure as an empty result.

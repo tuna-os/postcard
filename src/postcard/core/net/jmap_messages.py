@@ -13,10 +13,12 @@ from datetime import datetime
 
 from ..models.message_header import MessageHeader
 from ..threader import NO_SUBJECT
+from .imap_session import FLAG_FLAGGED, FLAG_SEEN
 from .jmap_session import (
     CODE_HTTP,
     CODE_INVALID_ARGUMENTS,
     CODE_NO_SUBMISSION,
+    CODE_NOT_FOUND,
     JmapCall,
     JmapError,
     JmapSession,
@@ -55,6 +57,17 @@ _HEADER_PROPERTIES = [
 # Properties that say where a message lives, for resolving an uncertain
 # submission without fetching its headers.
 _PLACEMENT_PROPERTIES = ["id", "mailboxIds"]
+
+# The blob holding the whole message, for serving one full download.
+_BLOB_PROPERTIES = ["blobId"]
+
+# What a Message-ID lookup compares, after the header filter narrows the
+# account down to candidates.
+_MESSAGE_ID_PROPERTIES = ["id", "header:Message-ID:asText"]
+
+# Candidates one Message-ID lookup compares: a resent id repeats a handful of
+# times, never thousands.
+_FIND_LIMIT = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +296,20 @@ def fetch_emails(
                 missing.append(gone)
     ordered = [found[email_id] for email_id in email_ids if email_id in found]
     return ordered, missing
+
+
+def fetch_mime(
+    jmap: JmapSession,
+    email_id: str,
+    cancelled: threading.Event | None = None,
+) -> bytes:
+    """The whole message as RFC 5322 bytes, the same thing an IMAP fetch gives:
+    the id's blob, downloaded by id."""
+    found, _missing = fetch_emails(jmap, [email_id], cancelled, _BLOB_PROPERTIES)
+    blob = found[0].get("blobId") if found else None
+    if not isinstance(blob, str) or not blob:
+        raise JmapError(0, CODE_NOT_FOUND, f"the server no longer has {email_id}")
+    return jmap.download_blob(blob, f"{email_id}.eml")
 
 
 def _walk(
@@ -590,6 +617,22 @@ def mark_starred(
     return set_keywords(jmap, email_ids, (), ("$flagged",), cancelled)
 
 
+def set_flag(
+    jmap: JmapSession,
+    email_ids: Sequence[str],
+    flag: str,
+    should_add: bool,
+    cancelled: threading.Event | None = None,
+) -> EmailSetResult:
+    """Add or remove one flag the window asks for, which always arrives in
+    IMAP spelling whatever the backend is."""
+    if flag == FLAG_SEEN:
+        return mark_read(jmap, email_ids, should_add, cancelled)
+    if flag == FLAG_FLAGGED:
+        return mark_starred(jmap, email_ids, should_add, cancelled)
+    raise JmapError(0, CODE_INVALID_ARGUMENTS, f"no JMAP keyword for {flag}")
+
+
 def move_emails(
     jmap: JmapSession,
     email_ids: Sequence[str],
@@ -755,6 +798,44 @@ def resolve_uncertain_submission(
     if not found:
         return None
     return was_submitted(found[0], sent_mailbox_id)
+
+
+def find_by_message_id(
+    jmap: JmapSession,
+    message_id: str,
+    cancelled: threading.Event | None = None,
+) -> str | None:
+    """The id of the message carrying this Message-ID, or None when no kept
+    message does. The header filter narrows the account to candidates; an
+    exact compare decides, since servers match the filter value loosely."""
+    raise_if_cancelled(cancelled)
+    [answer] = jmap.request(
+        [
+            JmapCall(
+                "Email/query",
+                {
+                    "accountId": jmap.account_id,
+                    "filter": {"header": ["Message-ID", message_id]},
+                    "sort": _SORT,
+                    "collapseThreads": False,
+                    "position": 0,
+                    "limit": _FIND_LIMIT,
+                },
+            )
+        ],
+        cancelled,
+    )
+    ids = result_or_raise(answer).get("ids", [])
+    if not isinstance(ids, list):
+        raise JmapError(0, CODE_HTTP, "Email/query answered without ids")
+    candidates = [email_id for email_id in ids if isinstance(email_id, str)]
+    if not candidates:
+        return None
+    found, _missing = fetch_emails(jmap, candidates, cancelled, _MESSAGE_ID_PROPERTIES)
+    for item in found:
+        if str(item.get("header:Message-ID:asText") or "") == message_id:
+            return str(item["id"])
+    return None
 
 
 def _changed_ids(payload: dict, key: str) -> list[str]:
