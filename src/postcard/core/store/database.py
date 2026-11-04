@@ -3,7 +3,7 @@ import logging
 import math
 import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -56,6 +56,15 @@ _EMAIL_COLUMNS = """
     in_reply_to, reference_ids, conversation_id
 """
 
+# What ordering and filtering a conversation page needs, without hydrating
+# the mails themselves: the thread key, the arrival and date order inputs,
+# and whether the thread reads as unread.
+_LIGHT_COLUMNS = "id, conversation_id, server_id, date, unread"
+
+# SQLite's bound-parameter ceiling (999 before 3.32): IN lists longer than
+# this are sent in pieces.
+_IN_CHUNK = 500
+
 
 def _fts_query(text: str) -> str:
     """Turn free text into a safe FTS5 query: each word matched as a prefix."""
@@ -74,13 +83,19 @@ def _arrival_key(mail: Email) -> float:
     A message with no UID yet (a Sent copy saved right after sending, before
     the next sync confirms it) sorts as the newest.
     """
-    if not mail.server_id:
+    return _arrival_key_for(mail.server_id, mail.date)
+
+
+def _arrival_key_for(server_id: str | None, date: str) -> float:
+    # Split out so a paged query orders its lightweight rows with the same key
+    # the full list orders its mails by, rather than a second implementation.
+    if not server_id:
         return math.inf
-    if mail.server_id.isdigit():
-        return int(mail.server_id)
+    if server_id.isdigit():
+        return int(server_id)
     # A Graph message id is opaque and says nothing about order, so fall back
     # to the date. A folder is all one kind, so the two scales never meet.
-    return _sent_key(mail)
+    return _sent_key_for(date)
 
 
 def _sent_key(mail: Email) -> float:
@@ -89,10 +104,20 @@ def _sent_key(mail: Email) -> float:
     # Date header is written by the sender: an unreadable one sorts *last*, so
     # junk with "Date: whenever" can't pin itself to the top of every inbox.
     # astimezone matches format_date, which reads a zone-less stamp as local.
+    return _sent_key_for(mail.date)
+
+
+def _sent_key_for(date: str) -> float:
     try:
-        return datetime.fromisoformat(mail.date).astimezone().timestamp()
+        return datetime.fromisoformat(date).astimezone().timestamp()
     except (TypeError, ValueError):
         return 0.0
+
+
+def _chunks[T](items: list[T], size: int) -> Iterator[list[T]]:
+    """Yield the items in pieces small enough for one IN list."""
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 # Schema changes since the first release, applied in order. How many have run
@@ -330,6 +355,16 @@ class Database:
         self._conn.execute("PRAGMA synchronous = NORMAL")
         self._conn.execute("PRAGMA foreign_keys = ON")
 
+        # What reassign_conversations last threaded, per folder: the row count,
+        # the highest id, and how many rows still want a conversation id or a
+        # Message-ID. Any insert or delete moves the count, and the one write
+        # that fills a threading header in place (save_raw_message) moves the
+        # Message-ID count; in-place flag and recipient updates never touch
+        # threading, so they read as unchanged. Equal to the stored state
+        # means the stored conversation ids are still right and the rethread
+        # is skipped.
+        self._thread_fingerprints: dict[int, tuple[int, int, int, int]] = {}
+
         self._create_tables()
         self._migrate_schema()
         if path != ":memory:":
@@ -526,9 +561,14 @@ class Database:
             """,
             (account_id,),
         )
+        rows = self._conn.execute(
+            "SELECT id FROM folders WHERE account_id = ?", (account_id,)
+        ).fetchall()
         self._conn.execute("DELETE FROM folders WHERE account_id = ?", (account_id,))
         self._conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         self._conn.commit()
+        for row in rows:
+            self._forget_thread_state(row["id"])
 
     def _folder_from_row(self, row: sqlite3.Row) -> Folder:
         return Folder(
@@ -635,6 +675,12 @@ class Database:
             self._delete_folder_tree(child["id"])
         self._conn.execute("DELETE FROM emails WHERE folder_id = ?", (folder_id,))
         self._conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+        self._forget_thread_state(folder_id)
+
+    def _forget_thread_state(self, folder_id: int) -> None:
+        # A deleted folder's id can be reused: a fingerprint left behind could
+        # match the new folder's counts and skip a rethread it still needs.
+        self._thread_fingerprints.pop(folder_id, None)
 
     def prune_folders(self, account_id: int, keep_names: set[str]) -> None:
         """Delete an account's folders (and their emails) whose names aren't in
@@ -684,38 +730,125 @@ class Database:
             finally:
                 self._conn.execute("DROP TABLE prune_active_uids")
 
-    def reassign_conversations(self, folder_id: int) -> None:
+    def reassign_conversations(self, folder_id: int) -> bool:
         """Recompute the thread grouping for a folder and store it on each row.
 
-        This runs after every sync, where almost nothing has moved thread, so
-        rows that already hold the right id are left alone.
+        Returns True when it rethreaded. A sync that changed nothing -- no new
+        mail, nothing pruned, no UIDVALIDITY reset -- leaves the threading
+        inputs exactly as the last run saw them, so the stored ids are still
+        right and the whole-folder regroup is skipped. Rows that already hold
+        the right id are left alone either way.
         """
-        emails = self.emails_in_folder(folder_id)
-        groups = threader.group(emails)
+        if self._thread_fingerprints.get(folder_id) == self._thread_fingerprint(
+            folder_id
+        ):
+            return False
+        rows = self._conn.execute(
+            """
+            SELECT id, message_id, in_reply_to, reference_ids, subject,
+                conversation_id
+            FROM emails WHERE folder_id = ?
+            """,
+            (folder_id,),
+        ).fetchall()
+        groups = threader.group_keys(
+            [
+                threader.ThreadingKey(
+                    id=row["id"],
+                    message_id=row["message_id"] or "",
+                    in_reply_to=row["in_reply_to"] or "",
+                    references=row["reference_ids"] or "",
+                    subject=row["subject"],
+                )
+                for row in rows
+            ]
+        )
         with self._conn:
             self._conn.executemany(
                 "UPDATE emails SET conversation_id = ? WHERE id = ?",
                 [
-                    (groups[mail.id], mail.id)
-                    for mail in emails
-                    if groups[mail.id] != mail.conversation_id
+                    (groups[row["id"]], row["id"])
+                    for row in rows
+                    if groups[row["id"]] != row["conversation_id"]
                 ],
             )
+        self._thread_fingerprints[folder_id] = self._thread_fingerprint(folder_id)
+        return True
 
-    def conversations_in_folders(self, folder_ids: Sequence[int]) -> list[Conversation]:
-        """Group the folders' emails into threads, newest thread first."""
+    def _thread_fingerprint(self, folder_id: int) -> tuple[int, int, int, int]:
+        """What the folder's threading inputs looked like: the row count, the
+        highest id, and how many rows still want a conversation id or a
+        Message-ID.
+
+        Every insert moves the count and lands with a NULL conversation_id; a
+        delete moves the count too. Filling a row's Message-ID in place (a
+        body fetch for a mail synced without one) moves the Message-ID count.
+        In-place flag and recipient updates never touch threading, so they
+        read as unchanged.
+        """
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS total, COALESCE(MAX(id), 0) AS top,
+                COALESCE(SUM(conversation_id IS NULL), 0) AS unassigned,
+                COALESCE(SUM(message_id IS NULL OR message_id = ''), 0)
+                    AS missing_mid
+            FROM emails WHERE folder_id = ?
+            """,
+            (folder_id,),
+        ).fetchone()
+        return (row["total"], row["top"], row["unassigned"], row["missing_mid"])
+
+    def conversations_in_folders(
+        self,
+        folder_ids: Sequence[int],
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        unread_only: bool = False,
+        keep_id: int | None = None,
+    ) -> list[Conversation]:
+        """Group the folders' emails into threads, newest thread first.
+
+        A limit builds only that many threads, starting at offset -- opening a
+        50k-mail folder costs one page, not the folder. unread_only keeps the
+        threads with unread mail, plus keep_id (the conversation being read),
+        and still returns each kept thread whole.
+        """
         if not folder_ids:
             return []
 
-        places = ",".join("?" * len(folder_ids))
-        rows = self._conn.execute(
-            f"SELECT {_EMAIL_COLUMNS} FROM emails WHERE folder_id IN ({places})",
-            tuple(folder_ids),
+        ids = tuple(folder_ids)
+        places = ",".join("?" * len(ids))
+        if limit is None and offset == 0 and not unread_only:
+            rows = self._conn.execute(
+                f"""SELECT {_EMAIL_COLUMNS} FROM emails
+                WHERE folder_id IN ({places}) ORDER BY id""",
+                ids,
+            ).fetchall()
+            return self._conversations_from_rows(rows, is_multi_folder=len(ids) > 1)
+        light = self._conn.execute(
+            f"""SELECT {_LIGHT_COLUMNS} FROM emails
+            WHERE folder_id IN ({places}) ORDER BY id""",
+            ids,
         ).fetchall()
-        return self._conversations_from_rows(rows, is_multi_folder=len(folder_ids) > 1)
+        return self._conversation_page(
+            light,
+            ids,
+            limit=limit,
+            offset=offset,
+            unread_only=unread_only,
+            keep_id=keep_id,
+        )
 
     def search_conversations(
-        self, folder_ids: Sequence[int], query: str
+        self,
+        folder_ids: Sequence[int],
+        query: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        unread_only: bool = False,
+        keep_id: int | None = None,
     ) -> list[Conversation]:
         """Full-text search the folders; return each matching conversation whole.
 
@@ -728,22 +861,107 @@ class Database:
 
         match = _fts_query(query)
         if not match:
-            return self.conversations_in_folders(folder_ids)
+            return self.conversations_in_folders(
+                folder_ids,
+                limit=limit,
+                offset=offset,
+                unread_only=unread_only,
+                keep_id=keep_id,
+            )
 
-        places = ",".join("?" * len(folder_ids))
-        rows = self._conn.execute(
-            f"""
-            SELECT {_EMAIL_COLUMNS} FROM emails
-            WHERE folder_id IN ({places}) AND COALESCE(conversation_id, id) IN (
+        ids = tuple(folder_ids)
+        places = ",".join("?" * len(ids))
+        narrow = f"""COALESCE(conversation_id, id) IN (
                 SELECT COALESCE(e.conversation_id, e.id)
                 FROM emails_fts f
                 JOIN emails e ON e.id = f.rowid
                 WHERE e.folder_id IN ({places}) AND emails_fts MATCH ?
-            )
-            """,
-            (*folder_ids, *folder_ids, match),
+            )"""
+        if limit is None and offset == 0 and not unread_only:
+            rows = self._conn.execute(
+                f"""SELECT {_EMAIL_COLUMNS} FROM emails
+                WHERE folder_id IN ({places}) AND {narrow}
+                ORDER BY id""",
+                (*ids, *ids, match),
+            ).fetchall()
+            return self._conversations_from_rows(rows, is_multi_folder=len(ids) > 1)
+        light = self._conn.execute(
+            f"""SELECT {_LIGHT_COLUMNS} FROM emails
+            WHERE folder_id IN ({places}) AND {narrow}
+            ORDER BY id""",
+            (*ids, *ids, match),
         ).fetchall()
-        return self._conversations_from_rows(rows, is_multi_folder=len(folder_ids) > 1)
+        return self._conversation_page(
+            light,
+            ids,
+            limit=limit,
+            offset=offset,
+            unread_only=unread_only,
+            keep_id=keep_id,
+        )
+
+    def _conversation_page(
+        self,
+        light_rows: Sequence[sqlite3.Row],
+        folder_ids: tuple[int, ...],
+        *,
+        limit: int | None,
+        offset: int,
+        unread_only: bool,
+        keep_id: int | None,
+    ) -> list[Conversation]:
+        """Build one page of threads from lightweight rows.
+
+        The rows say which threads exist and how they order; only the page's
+        threads are then read in full. Grouping, filtering and ordering match
+        _conversations_from_rows, so a page is the full list cut to size.
+        """
+        groups: dict[int, list[sqlite3.Row]] = {}
+        for row in light_rows:
+            key = row["conversation_id"] or row["id"]
+            groups.setdefault(key, []).append(row)
+        is_multi_folder = len(folder_ids) > 1
+        latests = []
+        for key, mails in groups.items():
+            if (
+                unread_only
+                and key != keep_id
+                and not any(mail["unread"] for mail in mails)
+            ):
+                continue
+            latest = max(
+                mails,
+                key=lambda mail: _arrival_key_for(mail["server_id"], mail["date"]),
+            )
+            latests.append((key, latest))
+        if is_multi_folder:
+            latests.sort(key=lambda item: _sent_key_for(item[1]["date"]), reverse=True)
+        else:
+            latests.sort(
+                key=lambda item: _arrival_key_for(
+                    item[1]["server_id"], item[1]["date"]
+                ),
+                reverse=True,
+            )
+        end = None if limit is None else offset + limit
+        wanted = [key for key, _ in latests[offset:end]]
+        if not wanted:
+            return []
+        # In id order, in pieces: a fully scrolled folder names more threads
+        # than one IN list holds, and ascending chunks read back in the same
+        # row order the unpaged query returns.
+        places = ",".join("?" * len(folder_ids))
+        rows = []
+        for chunk in _chunks(sorted(wanted), _IN_CHUNK):
+            slots = ",".join("?" * len(chunk))
+            rows += self._conn.execute(
+                f"""SELECT {_EMAIL_COLUMNS} FROM emails
+                WHERE folder_id IN ({places})
+                    AND COALESCE(conversation_id, id) IN ({slots})
+                ORDER BY id""",
+                (*folder_ids, *chunk),
+            ).fetchall()
+        return self._conversations_from_rows(rows, is_multi_folder=is_multi_folder)
 
     def _conversations_from_rows(
         self, rows: Sequence[sqlite3.Row], *, is_multi_folder: bool
@@ -930,61 +1148,127 @@ class Database:
         one. Returns True when the row was new, which is how a sync tells which
         messages to notify about.
         """
-        row = self._conn.execute(
-            "SELECT message_id FROM emails WHERE folder_id = ? AND server_id = ?",
-            (folder_id, header.uid),
-        ).fetchone()
-        is_new = row is None
-        if row is not None and (row["message_id"] or "") != (header.message_id or ""):
-            # Another message at the same UID (a mailbox that reset its UIDs).
-            # The upsert below never rewrites the headers, so replace the row --
-            # which also drops its cached body, now the wrong message's.
-            self._conn.execute(
-                "DELETE FROM emails WHERE folder_id = ? AND server_id = ?",
-                (folder_id, header.uid),
-            )
-            is_new = True
-        if header.message_id:
-            # The UID-less copy saved when the message was sent (or moved) is
-            # now a duplicate, and one that sorts as newest forever.
-            self._conn.execute(
+        return self.save_incoming_emails(folder_id, [header])[0]
+
+    def save_incoming_emails(
+        self, folder_id: int, headers: Sequence[MessageHeader]
+    ) -> list[bool]:
+        """Insert a sync page's fetched emails in a single transaction.
+
+        Each header is stored exactly as save_incoming_email would store it --
+        a UID holding another message's headers is replaced, a UID-less copy
+        with the same Message-ID is dropped, and a known UID only takes new
+        flags -- and the returned flags say per header, in order, whether its
+        row was new. One commit for the page instead of one per message.
+        """
+        headers = list(headers)
+        if not headers:
+            return []
+        stored = self._stored_message_ids(folder_id, {header.uid for header in headers})
+        # Walked in order so a UID named twice reads the way two sequential
+        # saves would: the first insert wins the row, a later Message-ID wins
+        # the replace, and every header still reports its own outcome.
+        is_new_flags: list[bool] = []
+        replaced: list[str] = []
+        effective: dict[str, int] = {}
+        for index, header in enumerate(headers):
+            message_id = header.message_id or ""
+            if header.uid in stored and stored[header.uid] != message_id:
+                # Another message at the same UID (a mailbox that reset its
+                # UIDs). The upsert never rewrites the headers, so the row is
+                # replaced -- which also drops its cached body, now the wrong
+                # message's.
+                replaced.append(header.uid)
+                stored[header.uid] = message_id
+                effective[header.uid] = index
+                is_new_flags.append(True)
+            else:
+                is_new_flags.append(header.uid not in stored)
+                stored.setdefault(header.uid, message_id)
+                effective.setdefault(header.uid, index)
+        # The UID-less copies saved when a message was sent (or moved) are now
+        # duplicates, and ones that sort as newest forever.
+        uidless = {header.message_id for header in headers if header.message_id}
+        positions: dict[str, list[int]] = {}
+        for index, header in enumerate(headers):
+            positions.setdefault(header.uid, []).append(index)
+        with self._conn:
+            for uid in dict.fromkeys(replaced):
+                self._conn.execute(
+                    "DELETE FROM emails WHERE folder_id = ? AND server_id = ?",
+                    (folder_id, uid),
+                )
+            for chunk in _chunks(sorted(uidless), _IN_CHUNK):
+                places = ",".join("?" * len(chunk))
+                self._conn.execute(
+                    f"""DELETE FROM emails
+                    WHERE folder_id = ? AND server_id IS NULL
+                        AND message_id IN ({places})""",
+                    (folder_id, *chunk),
+                )
+            self._conn.executemany(
                 """
-                DELETE FROM emails
-                WHERE folder_id = ? AND server_id IS NULL AND message_id = ?
+                INSERT INTO emails
+                    (folder_id, server_id, sender, subject, preview, date, unread,
+                     starred, message_id, in_reply_to, reference_ids,
+                     sender_address, recipient, recipient_address)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (folder_id, server_id) DO UPDATE SET
+                    unread = excluded.unread, starred = excluded.starred,
+                    recipient = excluded.recipient,
+                    recipient_address = excluded.recipient_address
                 """,
-                (folder_id, header.message_id),
+                [
+                    self._incoming_params(
+                        folder_id, headers[effective[uid]], headers[indexes[-1]]
+                    )
+                    for uid, indexes in positions.items()
+                ],
             )
-        self._conn.execute(
-            """
-            INSERT INTO emails
-                (folder_id, server_id, sender, subject, preview, date, unread,
-                 starred, message_id, in_reply_to, reference_ids, sender_address,
-                 recipient, recipient_address)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (folder_id, server_id) DO UPDATE SET
-                unread = excluded.unread, starred = excluded.starred,
-                recipient = excluded.recipient,
-                recipient_address = excluded.recipient_address
-            """,
-            (
-                folder_id,
-                header.uid,
-                header.sender,
-                header.subject,
-                header.preview,
-                header.date,
-                int(header.is_unread),
-                int(header.is_starred),
-                header.message_id,
-                header.in_reply_to,
-                header.references,
-                header.sender_address,
-                header.recipient,
-                header.recipient_address,
-            ),
+        return is_new_flags
+
+    @staticmethod
+    def _incoming_params(
+        folder_id: int, filed: MessageHeader, latest: MessageHeader
+    ) -> tuple:
+        """One upsert row: the headers of the message the row keeps, with the
+        flags of the last header seen for its UID.
+
+        A page names each UID once, so the two are usually the same header. A
+        UID named twice keeps the last header that replaced it (or the first,
+        when none did) while still taking the newest flags -- the row sequential
+        saves would have left behind.
+        """
+        return (
+            folder_id,
+            filed.uid,
+            filed.sender,
+            filed.subject,
+            filed.preview,
+            filed.date,
+            int(latest.is_unread),
+            int(latest.is_starred),
+            filed.message_id,
+            filed.in_reply_to,
+            filed.references,
+            filed.sender_address,
+            latest.recipient,
+            latest.recipient_address,
         )
-        self._conn.commit()
-        return is_new
+
+    def _stored_message_ids(self, folder_id: int, uids: set[str]) -> dict[str, str]:
+        """The Message-IDs the folder already holds for these UIDs."""
+        stored: dict[str, str] = {}
+        for chunk in _chunks(sorted(uids), _IN_CHUNK):
+            places = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"""SELECT server_id, message_id FROM emails
+                WHERE folder_id = ? AND server_id IN ({places})""",
+                (folder_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                stored[row["server_id"]] = row["message_id"] or ""
+        return stored
 
     def delete_email(self, email_id: int) -> None:
         self._conn.execute("DELETE FROM emails WHERE id = ?", (email_id,))

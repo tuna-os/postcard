@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 
 from .models.email import Email
 
@@ -11,10 +12,38 @@ _REPLY_PREFIXES = re.compile(r"^(\s*(re|fwd|fw)\s*:\s*)+", re.IGNORECASE)
 NO_SUBJECT = "(no subject)"
 
 
+@dataclass(frozen=True, slots=True)
+class ThreadingKey:
+    """The only fields threading reads: a folder's rethread builds these
+    straight from its rows instead of hydrating every mail first."""
+
+    id: int
+    message_id: str
+    in_reply_to: str
+    references: str
+    subject: str
+
+
 def group(emails: list[Email]) -> dict[int, int]:
     """Map each email id to a stable conversation id (the smallest id in its
     group). Links by Message-ID / In-Reply-To / References, with a same-subject
     fallback."""
+    return group_keys(
+        [
+            ThreadingKey(
+                id=mail.id,
+                message_id=mail.message_id,
+                in_reply_to=mail.in_reply_to,
+                references=mail.references,
+                subject=mail.subject,
+            )
+            for mail in emails
+        ]
+    )
+
+
+def group_keys(keys: list[ThreadingKey]) -> dict[int, int]:
+    """Group threading keys the way group() groups emails."""
     # Union-find over message tokens: each token points at another token in its
     # set, and the set's representative points at itself.
     parents: dict[str, str] = {}
@@ -31,32 +60,32 @@ def group(emails: list[Email]) -> dict[int, int]:
 
     # Every email gets a token: its Message-ID, or a synthetic one so a message
     # with no Message-ID still stands on its own.
-    tokens = {mail.id: mail.message_id.strip() or f"eid:{mail.id}" for mail in emails}
+    tokens = {key.id: key.message_id.strip() or f"eid:{key.id}" for key in keys}
 
-    for mail in emails:
-        token = tokens[mail.id]
-        if mail.in_reply_to.strip():
-            union(token, mail.in_reply_to.strip())
-        for ref in mail.references.split():
+    for key in keys:
+        token = tokens[key.id]
+        if key.in_reply_to.strip():
+            union(token, key.in_reply_to.strip())
+        for ref in key.references.split():
             union(token, ref)
 
     by_subject: dict[str, str] = {}
-    for mail in emails:
-        subject = _normalize_subject(mail.subject)
+    for key in keys:
+        subject = _normalize_subject(key.subject)
         if not subject:
             continue
         if subject in by_subject:
-            union(tokens[mail.id], by_subject[subject])
+            union(tokens[key.id], by_subject[subject])
         else:
-            by_subject[subject] = tokens[mail.id]
+            by_subject[subject] = tokens[key.id]
 
     root_min_id: dict[str, int] = {}
-    for mail in emails:
-        root = find(tokens[mail.id])
-        if root not in root_min_id or mail.id < root_min_id[root]:
-            root_min_id[root] = mail.id
+    for key in keys:
+        root = find(tokens[key.id])
+        if root not in root_min_id or key.id < root_min_id[root]:
+            root_min_id[root] = key.id
 
-    return {mail.id: root_min_id[find(tokens[mail.id])] for mail in emails}
+    return {key.id: root_min_id[find(tokens[key.id])] for key in keys}
 
 
 def _normalize_subject(subject: str) -> str:

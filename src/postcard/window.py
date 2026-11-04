@@ -90,6 +90,11 @@ MAX_NOTIFY_ICON_PX = 512
 # it is registered on its own wherever these are.
 _MOVE_PARAM_TYPE = "s"
 
+# How many conversations one list refresh builds: opening a folder costs one
+# page from the cache no matter how much mail it holds, and scrolling past it
+# appends the next page before the server is asked for older mail.
+_CONVERSATION_PAGE_SIZE = 200
+
 
 def _register(
     target: Gio.ActionMap,
@@ -363,6 +368,14 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._selection: Gtk.MultiSelection = Gtk.MultiSelection(
             model=self._conversation_store
         )
+        # Conversation-list paging: how many threads the list currently holds,
+        # whether the cache holds more past them, and which view they belong
+        # to. A refresh keeps the loaded depth so a sync never shrinks the
+        # list under the scroll position; a new folder, query or filter
+        # resets it to the first page.
+        self._list_limit = _CONVERSATION_PAGE_SIZE
+        self._list_has_more = False
+        self._list_key: tuple[tuple[int, ...], str, bool] | None = None
 
         self._setup_folder_sidebar()
         self._setup_conversation_list()
@@ -1817,21 +1830,32 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._restore_scroll(vadjustment, scroll_position)
 
     def _matching_conversations(self, keep_id: int | None) -> list[Conversation]:
-        """The conversations on screen, narrowed by the search box and filter."""
+        """The conversations on screen, narrowed by the search box and filter.
+
+        One page from the cache: the query asks for a row past the loaded
+        depth, so its absence also says whether scrolling further can append
+        another page. The unread filter runs in the same query, still keeping
+        the conversation being read (keep_id) even once it's marked read, so
+        opening a mail there doesn't make it vanish under you; it drops out on
+        the next refresh when you move to another.
+        """
         folder_ids = [folder.id for folder in self._view_folders()]
         query = self.search_entry.get_text().strip()
-        matches = (
-            self._db.search_conversations(folder_ids, query)
-            if query
-            else self._db.conversations_in_folders(folder_ids)
+        unread_only = self.unread_button.get_active()
+        key = (tuple(folder_ids), query, unread_only)
+        if key != self._list_key:
+            self._list_key = key
+            self._list_limit = _CONVERSATION_PAGE_SIZE
+        # An empty query lists the folders; the branch lives in the query.
+        matches = self._db.search_conversations(
+            folder_ids,
+            query,
+            limit=self._list_limit + 1,
+            unread_only=unread_only,
+            keep_id=keep_id,
         )
-
-        if not self.unread_button.get_active():
-            return matches
-        # Keep the conversation being read (keep_id) even once it's marked read,
-        # so opening a mail here doesn't make it vanish under you; it drops out
-        # on the next refresh when you move to another.
-        return [item for item in matches if item.is_unread or item.id == keep_id]
+        self._list_has_more = len(matches) > self._list_limit
+        return matches[: self._list_limit]
 
     def _replace_conversations(
         self, matches: list[Conversation], keep_id: int | None
@@ -1934,12 +1958,18 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self.conversation_list.set_model(self._selection)
         self.conversation_list.set_factory(self._build_conversation_factory())
 
-    # Scrolling to the bottom pulls the next-older page for every folder on
-    # screen that the last sync said has more to fetch, each at its own offset.
+    # Scrolling to the bottom first appends the next page of cached
+    # conversations, then -- once the cache is exhausted -- pulls the
+    # next-older page from the server for every folder on screen that the last
+    # sync said has more to fetch, each at its own offset.
     def _on_list_edge_reached(
         self, _scroller: Gtk.ScrolledWindow, pos: Gtk.PositionType
     ) -> None:
-        if pos != Gtk.PositionType.BOTTOM or not self._is_online:
+        if pos != Gtk.PositionType.BOTTOM:
+            return
+        if self._load_more_conversations():
+            return
+        if not self._is_online:
             return
         if self._is_view_syncing():
             return
@@ -1952,6 +1982,38 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 folder_name=folder.name,
                 offset=self._loaded_counts.get(folder.id, 0),
             )
+
+    # Append the next page of cached conversations without touching the
+    # selection or the scroll position. True when a page was appended.
+    def _load_more_conversations(self) -> bool:
+        if not self._list_has_more or self._current_folder is None:
+            return False
+        folder_ids = [folder.id for folder in self._view_folders()]
+        query = self.search_entry.get_text().strip()
+        unread_only = self.unread_button.get_active()
+        if (tuple(folder_ids), query, unread_only) != self._list_key:
+            # The view changed since the list was built (a keystroke the
+            # search debounce hasn't fired for yet): the pending refresh
+            # rebuilds from the first page, so there is nothing to append to.
+            return False
+        selected = self._selected_conversation()
+        keep_id = selected.id if selected is not None else None
+        offset = self._conversation_store.get_n_items()
+        matches = self._db.search_conversations(
+            folder_ids,
+            query,
+            limit=_CONVERSATION_PAGE_SIZE + 1,
+            offset=offset,
+            unread_only=unread_only,
+            keep_id=keep_id,
+        )
+        self._list_has_more = len(matches) > _CONVERSATION_PAGE_SIZE
+        page = matches[:_CONVERSATION_PAGE_SIZE]
+        if not page:
+            return False
+        self._conversation_store.splice(offset, 0, page)
+        self._list_limit = offset + len(page)
+        return True
 
     def _on_selection_changed(
         self, _selection: Gtk.MultiSelection, _position: int, _n_items: int
@@ -2903,13 +2965,19 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             self._loaded_counts.pop(target.id, None)
             for key in [key for key in self._move_tombstones if key[0] == target.id]:
                 del self._move_tombstones[key]
-        new_messages: list[mail_sync.MessageHeader] = []
-        for message in result.messages:
-            if (target.id, message.uid) in self._move_tombstones:
-                continue
-            added = self._db.save_incoming_email(target.id, message)
-            if added and message.is_unread:
-                new_messages.append(message)
+        # One transaction for the page instead of one commit per message; the
+        # flags still say per header whether its row was new.
+        visible = [
+            message
+            for message in result.messages
+            if (target.id, message.uid) not in self._move_tombstones
+        ]
+        added_flags = self._db.save_incoming_emails(target.id, visible)
+        new_messages = [
+            message
+            for message, added in zip(visible, added_flags, strict=True)
+            if added and message.is_unread
+        ]
         if result.all_uids is not None:
             self._db.prune_stale_emails(target.id, result.all_uids)
             # Do this after filtering the fetched headers: an older snapshot
