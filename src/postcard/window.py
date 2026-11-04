@@ -40,8 +40,8 @@ from .core.models.attachment import Attachment
 from .core.models.conversation import Conversation
 from .core.models.email import Email
 from .core.models.folder import Folder
-from .core.net import errors, imap_session, ms_oauth
-from .core.store.database import Database, QueuedSend
+from .core.net import errors, imap_session, ms_oauth, smtp_session
+from .core.store.database import Database, OutboxState, QueuedSend
 from .folder_row import FolderRow
 from .message_view import LoadCallback, MessageView
 from .microsoft_dialog import PostcardMicrosoftDialog
@@ -2619,7 +2619,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         file_errors: list[Exception] = []
         for result in results:
             if result.error is not None:
-                mail_sync.fail_queued_send(self._db, result.email_id, str(result.error))
+                self._record_drained_error(result.email_id, result.error)
                 continue
             filed, file_error = self._file_drained_result(account, result)
             if file_error is not None:
@@ -2649,6 +2649,50 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         send_errors = [result.error for result in results if result.error is not None]
         self._show_drain_errors(account, send_errors)
         return False
+
+    def _record_drained_error(self, email_id: int, error: Exception) -> None:
+        """Record one drained send's failure, saying when it was partial.
+
+        A refusal narrows the envelope to the refused recipients so the
+        retry sends to them only; anything else fails the attempt as before.
+        A partial refusal -- some recipients already got it -- also gets a
+        toast saying so and what happens next, since the drain banner's
+        "couldn't send" would otherwise read as nothing going out.
+        """
+        if not isinstance(error, smtp_session.SmtpRefusedError):
+            mail_sync.fail_queued_send(self._db, email_id, str(error))
+            return
+        state = mail_sync.fail_refused_send(
+            self._db, email_id, error.refused, str(error)
+        )
+        if error.accepted:
+            self._show_partial_drain(error, state)
+
+    def _show_partial_drain(
+        self, error: smtp_session.SmtpRefusedError, state: OutboxState
+    ) -> None:
+        """Say a queued mail reached some recipients but not all of them.
+
+        The banner above already names the failure; this is the correction --
+        the mail did go out, to everyone but these addresses -- and what
+        happens next. Bare addresses only: the envelope does not say which
+        header anyone came from, and must not start.
+        """
+        addrs = ", ".join(error.refused)
+        if state is OutboxState.FAILED:
+            self._toast(
+                _(
+                    "Sent to some recipients, but the server refused {addrs}. "
+                    "Kept in the Outbox."
+                ).format(addrs=addrs)
+            )
+        else:
+            self._toast(
+                _(
+                    "Sent to some recipients, but the server refused {addrs}. "
+                    "Will retry."
+                ).format(addrs=addrs)
+            )
 
     def _file_drained_result(
         self, account: Account, result: OutboxResult

@@ -8,7 +8,41 @@ logger = logging.getLogger(__name__)
 
 
 class SmtpError(Exception):
-    """Raised when talking to the server fails (bad login, dropped link, ..)"""
+    """Raised when talking to the server fails (bad login, dropped link, ..)
+
+    unknown names the recipients whose delivery state is unknowable: the
+    link died mid-send, so the server may have taken the message for some
+    of them before it went. Retrying one sends to all of them again.
+    """
+
+    def __init__(self, message: str = "", *, unknown: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.unknown = unknown
+
+
+class SmtpRefusedError(SmtpError):
+    """The server answered, refusing the message for some recipients.
+
+    refused is who to retry; accepted already got it and must never be
+    re-sent. Total when accepted is empty, partial otherwise. The message
+    names addresses only, never the server's verbatim reason: that text is
+    diagnostics, logged at the boundary, not user-facing copy.
+    """
+
+    def __init__(
+        self,
+        refused: tuple[str, ...],
+        accepted: tuple[str, ...] = (),
+        unknown: tuple[str, ...] = (),
+    ) -> None:
+        if not refused:
+            raise ValueError("a refusal names at least one refused recipient")
+        self.refused = refused
+        self.accepted = accepted
+        message = f"the server refused these recipients: {', '.join(refused)}"
+        if accepted:
+            message += f" (already sent to {', '.join(accepted)})"
+        super().__init__(message, unknown=unknown)
 
 
 class SmtpSession:
@@ -56,16 +90,27 @@ class SmtpSession:
             refused = self._require_smtp().sendmail(from_addr, recipients, raw)
         except smtplib.SMTPException as error:
             raise SmtpError(
-                f"could not send to {', '.join(recipients)}: {error}"
+                f"could not send to {', '.join(recipients)}: {error}",
+                unknown=tuple(recipients),
             ) from error
         if refused:
             # sendmail reports per-recipient refusals by returning them, not by
             # raising: an empty dict is the only proof every recipient took it.
-            details = "; ".join(
-                f"{address}: {code} {response.decode('ascii', 'replace').strip()}"
-                for address, (code, response) in refused.items()
+            # The reasons stay in the log; the exception names addresses only,
+            # since its message reaches the user verbatim through classify().
+            for address, (code, response) in refused.items():
+                logger.warning(
+                    "SMTP server refused %s: %s %s",
+                    address,
+                    code,
+                    response.decode("ascii", "replace").strip(),
+                )
+            raise SmtpRefusedError(
+                refused=tuple(refused),
+                accepted=tuple(
+                    address for address in recipients if address not in refused
+                ),
             )
-            raise SmtpError(f"could not send to {', '.join(refused)}: {details}")
 
     def _require_smtp(self) -> smtplib.SMTP:
         # Never return None: `if self._smtp is not None` around the sendmail

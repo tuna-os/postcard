@@ -29,7 +29,7 @@ from .core import compose, secrets
 from .core.lifecycle import JobToken, Lifecycle
 from .core.models.account import Account
 from .core.models.attachment import Attachment
-from .core.net import errors
+from .core.net import errors, smtp_session
 from .core.store.database import Database, OutboxState, QueuedSend
 from .core.threader import NO_SUBJECT
 
@@ -1008,9 +1008,18 @@ class PostcardComposerWindow(Adw.Window):
                 self.destroy()
             return False
         mail_sync.release_queued_send(email_id)
-        state = mail_sync.fail_queued_send(
-            self._db, email_id, str(error) if error is not None else message
-        )
+        if isinstance(error, smtp_session.SmtpRefusedError):
+            state = mail_sync.fail_refused_send(
+                self._db, email_id, error.refused, str(error)
+            )
+            if error.accepted:
+                self.emit("finished", self._partial_failure(error, state))
+                self.destroy()
+                return False
+        else:
+            state = mail_sync.fail_queued_send(
+                self._db, email_id, str(error) if error is not None else message
+            )
         if state is OutboxState.FAILED:
             failure = _(
                 "Couldn't send after several tries: {msg}. Kept in the Outbox."
@@ -1020,6 +1029,25 @@ class PostcardComposerWindow(Adw.Window):
         self.emit("finished", failure)
         self.destroy()
         return False
+
+    @staticmethod
+    def _partial_failure(
+        error: smtp_session.SmtpRefusedError, state: OutboxState
+    ) -> str:
+        """The composer is closing on a mail some recipients already got.
+
+        Bare addresses only: the envelope does not say which header anyone
+        came from, and must not start.
+        """
+        addrs = ", ".join(error.refused)
+        if state is OutboxState.FAILED:
+            return _(
+                "Sent to some recipients, but the server refused {addrs}. "
+                "Kept in the Outbox."
+            ).format(addrs=addrs)
+        return _(
+            "Sent to some recipients, but the server refused {addrs}. Saved to Outbox."
+        ).format(addrs=addrs)
 
 
 def _now() -> str:
