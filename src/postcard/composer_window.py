@@ -397,18 +397,25 @@ class PostcardComposerWindow(Adw.Window):
         bcc: str = "",
         in_reply_to: str = "",
         references: str = "",
+        attachments: list[Attachment] | None = None,
+        draft_id: int | None = None,
     ) -> None:
         super().__init__(application=app)
         self._db = db
         self._account = account
         self._in_reply_to = in_reply_to
         self._references = references
+        # The saved draft this composer reopens, replaced on save or send.
+        self._draft_id = draft_id
         # Its own generations, so closing a main window never strands a send;
         # account removal still reaches it through mail_sync's broadcast.
         self._lifecycle = Lifecycle()
         mail_sync.register_lifecycle(self._lifecycle)
         self._is_destroyed = False
         self._attachments: list[Attachment] = []
+        for attachment in attachments or []:
+            self._attachments.append(attachment)
+            self._add_attachment_row(attachment)
         self._body_html = _BLANK_LINE + body
         self._syncing = False
         self._is_sending = False
@@ -817,8 +824,18 @@ class PostcardComposerWindow(Adw.Window):
             preview=self._preview_text()[:100],
             date=_now(),
             is_unread=False,
+            envelope=compose.build_envelope(
+                self.to_row.get_text(),
+                self.cc_row.get_text(),
+                self.bcc_row.get_text(),
+            ),
         )
         self._db.save_raw_message(row.id, msg.as_bytes())
+        if self._draft_id is not None and self._draft_id != row.id:
+            # A reopened draft: the new row replaces the old one rather than
+            # doubling it. Saved first, so a crash keeps both, never neither.
+            self._db.delete_email(self._draft_id)
+            self._draft_id = row.id
         self.emit("finished", "")
 
     def _send(self) -> None:
@@ -848,7 +865,12 @@ class PostcardComposerWindow(Adw.Window):
         # The SMTP envelope recipients, unlike the message's own To/Cc
         # headers, also carry Bcc addresses -- they must never appear in the
         # message itself, only in the delivery instructions given to the server.
-        recipients = to_addrs + cc_addrs + bcc_addrs
+        # Normalized to bare addresses: a "Name <addr>" row would otherwise
+        # reach the envelope -- and the queue -- with its display name on.
+        envelope = compose.build_envelope(
+            self.to_row.get_text(), self.cc_row.get_text(), self.bcc_row.get_text()
+        )
+        recipients = compose.flatten_envelope(envelope)
 
         # Save to Outbox before attempting to send -- a crash mid-send can
         # then never lose the message.
@@ -870,6 +892,11 @@ class PostcardComposerWindow(Adw.Window):
         )
         self._db.save_raw_message(row.id, raw)
         self._db.queue_outbox_email(row.id, recipients)
+        if self._draft_id is not None:
+            # The Outbox row carries the message now; the draft it came from
+            # would otherwise linger beside the Sent copy.
+            self._db.delete_email(self._draft_id)
+            self._draft_id = None
         job = mail_sync.claim_queued_send(self._db, row.id)
         if job is None:
             # A drain claimed it between the save and here; it owns the send
@@ -1059,4 +1086,26 @@ def composer_for_mailto(
         body=draft.body_html or signature_html(settings),
         cc=draft.cc,
         bcc=draft.bcc,
+    )
+
+
+# Build a composer reopening a saved draft, replacing it on save or send.
+def composer_for_draft(
+    app: Gtk.Application | None,
+    db: Database,
+    account: Account,
+    draft: compose.ReopenedDraft,
+    draft_id: int,
+) -> PostcardComposerWindow:
+    return PostcardComposerWindow(
+        app,
+        db,
+        account,
+        to=draft.to,
+        subject=draft.subject,
+        body=draft.body_html,
+        cc=draft.cc,
+        bcc=draft.bcc,
+        attachments=list(draft.attachments),
+        draft_id=draft_id,
     )

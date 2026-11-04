@@ -21,6 +21,7 @@ from .accounts_dialog import PostcardAccountsDialog
 from .avatar_loader import AvatarLoader
 from .composer_window import (
     PostcardComposerWindow,
+    composer_for_draft,
     composer_for_mailto,
     signature_html,
 )
@@ -691,6 +692,37 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         composer.connect("finished", self._on_composer_finished)
         composer.present()
 
+    def _draft_mail(self, conversation: Conversation) -> tuple[Account, Email] | None:
+        """The saved draft a conversation holds, if it holds one alone."""
+        mail = conversation.latest
+        origin = self._origin(mail)
+        if origin is None:
+            return None
+        account, folder = origin
+        if mail_sync.folder_role(folder) is not mail_sync.FolderRole.DRAFTS:
+            return None
+        if self._db.get_raw_message(mail.id) is None:
+            return None
+        return account, mail
+
+    def _on_edit_draft(self, _action: Gio.SimpleAction, _param: object) -> None:
+        conversation = self._selected_conversation()
+        if conversation is None:
+            return
+        found = self._draft_mail(conversation)
+        if found is None:
+            return
+        account, mail = found
+        raw = self._db.get_raw_message(mail.id)
+        if raw is None:
+            return
+        restored = compose.reopen_draft(raw, self._db.draft_envelope(mail.id))
+        composer = composer_for_draft(
+            self.get_application(), self._db, account, restored, mail.id
+        )
+        composer.connect("finished", self._on_composer_finished)
+        composer.present()
+
     def _on_composer_finished(
         self, _composer: PostcardComposerWindow, failure: str
     ) -> None:
@@ -1028,6 +1060,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             ("archive", self._on_archive),
             ("trash", self._on_trash),
             ("unsubscribe", self._on_unsubscribe),
+            ("edit-draft", self._on_edit_draft),
         ):
             _register(actions, name, handler)
         _register(actions, "move", self._on_move, _MOVE_PARAM_TYPE)
@@ -1053,6 +1086,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         menu.append_section(None, flags)
 
         actions = Gio.Menu()
+        if len(selected) == 1 and self._draft_mail(selected[0]) is not None:
+            actions.append(_("Edit Draft"), "context.edit-draft")
         actions.append(self._archive_label(), "context.archive")
         actions.append(_("Delete"), "context.trash")
         source = self._move_source(selected)

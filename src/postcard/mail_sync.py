@@ -1010,6 +1010,12 @@ def file_sent_email(
     if job.message_id:
         db.delete_emails_by_message_id(sent.id, job.message_id)
     name, address = recipient
+    if not address and job.envelope:
+        # A Bcc-only mail names nobody in To, so the caller has no recipient
+        # to show -- the first envelope address stands in, naming Bcc nowhere
+        # but the sender's own copy.
+        _shown, address = next(iter(getaddresses(job.envelope)), ("", ""))
+        name = name or address
     row = db.save_email(
         sent.id,
         sender=account.email,
