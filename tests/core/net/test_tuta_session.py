@@ -44,8 +44,9 @@ def test_session_cannot_use_a_password_or_oauth_token():
 
 
 def test_session_is_bound_to_account_identity():
-    with pytest.raises(TutaError):
+    with pytest.raises(TutaError) as caught:
         TutaSession(Credential("other@tuta.com", CREDENTIAL.secret, MECHANISM_TUTA))
+    assert caught.value.code == "session_invalid"
 
 
 @pytest.mark.parametrize(
@@ -149,7 +150,7 @@ def test_a_session_cannot_resume_a_shapeless_secret():
     credential = Credential(SESSION["login"], "not-json", MECHANISM_TUTA)
     with pytest.raises(TutaError) as caught:
         TutaSession(credential)
-    assert caught.value.code == "invalid_request"
+    assert caught.value.code == "session_invalid"
 
 
 @pytest.mark.parametrize(

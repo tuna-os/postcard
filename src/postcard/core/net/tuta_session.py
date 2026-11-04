@@ -171,12 +171,14 @@ class TutaSession:
         try:
             session = json.loads(credential.secret)
         except ValueError:
-            raise TutaError("invalid_request") from None
+            raise TutaError("session_invalid") from None
         if (
             not isinstance(session, dict)
             or session.get("login", "").casefold() != credential.user.casefold()
         ):
-            raise TutaError("invalid_request")
+            # Corrupt stored material, not a caller bug: the keyring entry is
+            # damaged and the account must be added again.
+            raise TutaError("session_invalid")
         self._session = session
         self._transport = transport
 
