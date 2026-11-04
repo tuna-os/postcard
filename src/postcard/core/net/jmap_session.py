@@ -1,10 +1,12 @@
-"""Session discovery and read-only requests for JMAP (RFC 8620 + RFC 8621).
+"""Session discovery and mail-only requests for JMAP (RFC 8620 + RFC 8621).
 
-Part 1 only fetches: Mailbox/get, Email/query, Email/queryChanges and
-Email/get. Anything else is refused before it reaches the network, so a
-read-only account is enough and no call can change the mailbox. Like the
-Graph session it only speaks the protocol: no database, no GTK, and it runs
-on a worker thread.
+Reads (Mailbox/get and /changes, Email/query and /queryChanges and /get and
+/changes, EmailSubmission/get) go over a default session. Writes (Email/set,
+EmailSubmission/set) need a session built with writable=True, and are still
+refused on an account the server marked read-only. Anything outside mail --
+calendars, contacts, quotas -- is refused before it reaches the network. Like
+the Graph session it only speaks the protocol: no database, no GTK, and it
+runs on a worker thread.
 """
 
 import base64
@@ -16,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
 from . import NET_TIMEOUT_SECONDS
@@ -26,32 +28,60 @@ logger = logging.getLogger(__name__)
 
 CORE_URN = "urn:ietf:params:jmap:core"
 MAIL_URN = "urn:ietf:params:jmap:mail"
+SUBMISSION_URN = "urn:ietf:params:jmap:submission"
 
-# The only calls part 1 ever sends. Everything else (Email/set, Email/import,
-# submission, calendars, contacts, ...) is refused in JmapSession.request.
+# The calls a default session sends: reads only, so a read-only account is
+# enough and no call can change the mailbox.
 READ_METHODS = frozenset(
-    {"Mailbox/get", "Email/query", "Email/queryChanges", "Email/get"}
+    {
+        "Mailbox/get",
+        "Mailbox/changes",
+        "Email/query",
+        "Email/queryChanges",
+        "Email/get",
+        "Email/changes",
+        "EmailSubmission/get",
+    }
 )
+
+# The calls a writable session additionally sends. Email/import is
+# deliberately absent: archiving server-side state the client never saw would
+# silently resurrect mail the user deleted elsewhere.
+WRITE_METHODS = frozenset({"Email/set", "EmailSubmission/set"})
+
+# Everything JmapSession.request ever sends. Calendars, contacts, vacation
+# responses and the rest are refused before they reach the network.
+MAIL_METHODS = READ_METHODS | WRITE_METHODS
 
 # Client-side error codes. A method the server itself refuses instead carries
 # the JMAP "type" it answered with, which is RFC 8620's own fixed vocabulary
-# (accountNotFound, unknownMethod, invalidArguments, cannotCalculateChanges).
+# (accountNotFound, unknownMethod, invalidArguments, cannotCalculateChanges,
+# stateMismatch). Per-object /set failures keep their own "type" in SetError.
 CODE_HTTP = "httpError"
 CODE_BAD_SESSION = "badSession"
 CODE_READ_ONLY = "readOnly"
 CODE_CANCELLED = "cancelled"
 CODE_INVALID_ARGUMENTS = "invalidArguments"
 CODE_UNSUPPORTED_CREDENTIAL = "unsupportedCredential"
+CODE_NO_SUBMISSION = "submissionUnsupported"
+CODE_PUSH_FAILED = "pushUnavailable"
 
-# Every part 1 call is a read, so a refused request is always safe to send
-# again -- unlike Graph's POST /me/sendMail, which may already have acted.
+# A stored state token the server no longer honours: the only way on is a
+# full walk, never applying the failure as an empty result.
+EXPIRED_STATE_CODES = frozenset({"cannotCalculateChanges"})
+
+# Reads are always safe to send again. Writes retry only on an explicit rate
+# limit (429 means "not processed, try later"); a 503/504 answer to a /set may
+# already have acted, so it is raised for the caller to reconcile instead.
 _RETRYABLE_STATUSES = frozenset({429, 503, 504})
+_WRITE_RETRYABLE_STATUSES = frozenset({429})
 _MAX_ATTEMPTS = 4
 _MAX_RETRY_SECONDS = 30
 
 # Used when the session resource omits the core capability's limits.
 _DEFAULT_MAX_CALLS = 16
 _DEFAULT_MAX_OBJECTS_IN_GET = 500
+_DEFAULT_MAX_OBJECTS_IN_SET = 100
 
 # The variables each URI template must provide to be usable.
 _DOWNLOAD_VARS = frozenset({"accountId", "blobId"})
@@ -136,6 +166,9 @@ class Session:
     capabilities: frozenset[str]
     max_calls: int
     max_objects_in_get: int
+    max_objects_in_set: int
+    is_read_only: bool
+    submission_supported: bool
 
     def download_url(self, blob_id: str, name: str) -> str:
         return expand_template(
@@ -192,9 +225,10 @@ def discover(
     if not isinstance(payload, dict):
         raise JmapError(0, CODE_BAD_SESSION, "the JMAP session answer was not JSON")
     capabilities = _capabilities(payload)
-    max_calls, max_objects = _limits(payload)
+    max_calls, max_objects, max_set = _limits(payload)
+    account_id = _mail_account(payload)
     return Session(
-        account_id=_mail_account(payload),
+        account_id=account_id,
         api_url=_api_url(payload, session_origin),
         download_template=_checked_template(
             payload, "downloadUrl", session_origin, _DOWNLOAD_VARS
@@ -208,6 +242,9 @@ def discover(
         capabilities=capabilities,
         max_calls=max_calls,
         max_objects_in_get=max_objects,
+        max_objects_in_set=max_set,
+        is_read_only=_is_read_only(payload, account_id),
+        submission_supported=SUBMISSION_URN in capabilities,
     )
 
 
@@ -240,8 +277,91 @@ def result_or_raise(answer: JmapAnswer) -> dict:
     return answer.payload
 
 
+def needs_full_sync(error: JmapError) -> bool:
+    """Whether a stored state token has expired: the caller must walk the
+    mailbox over instead of asking what changed. Any other failure is raised
+    as-is -- it says nothing about what the mailbox holds."""
+    return error.code in EXPIRED_STATE_CODES
+
+
+def is_state_mismatch(error: JmapError) -> bool:
+    """Whether a /set was refused because its ifInState no longer matches:
+    the caller must re-read the state and rebuild the change, not resend it."""
+    return error.code == "stateMismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class SetError:
+    """One object a /set call refused: the id (or creation id) plus the
+    server's typed reason. Its siblings in the same call may still have
+    applied, so this is returned, never raised."""
+
+    id: str
+    code: str
+    message: str
+
+
+def parse_set_errors(payload: dict, key: str) -> dict[str, SetError]:
+    """The per-object failures under a notCreated/notUpdated/notDestroyed key,
+    each keeping the server's "type" as its code."""
+    entries = payload.get(key, {})
+    if not isinstance(entries, dict):
+        raise JmapError(0, CODE_HTTP, f"the JMAP answer has no {key} map")
+    errors = {}
+    for failed_id, detail in entries.items():
+        detail = detail if isinstance(detail, dict) else {}
+        code = str(detail.get("type") or "serverFail")
+        errors[str(failed_id)] = SetError(
+            str(failed_id), code, str(detail.get("description") or code)
+        )
+    return errors
+
+
+def batch_calls(calls: list[JmapCall], max_calls: int) -> list[list[JmapCall]]:
+    """Split calls into requests of at most max_calls, honouring the server's
+    maxCallsInRequest. Single-call requests always fit."""
+    if max_calls < 1:
+        raise JmapError(0, CODE_INVALID_ARGUMENTS, "maxCallsInRequest is not usable")
+    return [
+        calls[start : start + max_calls] for start in range(0, len(calls), max_calls)
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class StateChange:
+    """What an event-source event announced: per account, the type names
+    (Email, Mailbox, ...) whose state moved. A hint to sync, never the sync."""
+
+    changed: dict[str, frozenset[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class PushConfig:
+    """How watch_push holds the event source: what to listen for, when the
+    server should hang up, and how hard to redial."""
+
+    types: str = "Email,Mailbox,EmailSubmission"
+    close_after: int = 300
+    ping: int = 30
+    max_reconnects: int = 5
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    sleep: Callable[[float], None] = time.sleep
+
+
+# Opens the event source and yields its text chunks until the server hangs up.
+StreamFactory = Callable[
+    [urllib.request.Request, "threading.Event | None"], Iterable[str]
+]
+
+
 class JmapSession:
-    """Read-only JMAP requests against one discovered Session."""
+    """Mail-only JMAP requests against one discovered Session.
+
+    A default session only reads. Pass writable=True for one that may also
+    send Email/set and EmailSubmission/set -- which is still refused when the
+    server marked the account read-only.
+    """
 
     def __init__(
         self,
@@ -249,33 +369,54 @@ class JmapSession:
         credential: Credential,
         transport: Transport = urlopen_transport,
         sleep: Callable[[float], None] = time.sleep,
+        writable: bool = False,
     ) -> None:
         self._session = session
         self._authorization = _auth_header(credential)
         self._transport = transport
         self._sleep = sleep
+        self._writable = writable
 
     @property
     def account_id(self) -> str:
         return self._session.account_id
 
     @property
+    def is_writable(self) -> bool:
+        """Whether /set calls go out: asked for and not forbidden."""
+        return self._writable and not self._session.is_read_only
+
+    @property
+    def submission_supported(self) -> bool:
+        return self._session.submission_supported
+
+    @property
+    def max_calls(self) -> int:
+        return self._session.max_calls
+
+    @property
     def max_objects_in_get(self) -> int:
         return self._session.max_objects_in_get
+
+    @property
+    def max_objects_in_set(self) -> int:
+        return self._session.max_objects_in_set
 
     def request(
         self,
         calls: list[JmapCall],
         cancelled: threading.Event | None = None,
     ) -> list[JmapAnswer]:
-        """POST method calls, retried while the server says it is only busy."""
+        """POST method calls, retried while the server says it is only busy.
+        Answers are matched to calls by call id, so each call needs its own."""
         raise_if_cancelled(cancelled)
-        for call in calls:
-            if call.method not in READ_METHODS:
-                raise JmapError(0, CODE_READ_ONLY, f"{call.method} is not a read call")
+        _check_calls(calls, self.is_writable)
+        using = [CORE_URN, MAIL_URN]
+        if any(call.method.startswith("EmailSubmission/") for call in calls):
+            using.append(SUBMISSION_URN)
         body = json.dumps(
             {
-                "using": [CORE_URN, MAIL_URN],
+                "using": using,
                 "methodCalls": [
                     [call.method, call.arguments, call.call_id] for call in calls
                 ],
@@ -286,16 +427,18 @@ class JmapSession:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        retryable = (
+            _WRITE_RETRYABLE_STATUSES
+            if any(call.method in WRITE_METHODS for call in calls)
+            else _RETRYABLE_STATUSES
+        )
         for attempt in range(_MAX_ATTEMPTS):
             raise_if_cancelled(cancelled)
             request = urllib.request.Request(
                 self._session.api_url, data=body, headers=headers, method="POST"
             )
             response = self._transport(request)
-            if (
-                response.status not in _RETRYABLE_STATUSES
-                or attempt == _MAX_ATTEMPTS - 1
-            ):
+            if response.status not in retryable or attempt == _MAX_ATTEMPTS - 1:
                 break
             delay = _retry_delay(response.headers, attempt)
             logger.debug(
@@ -319,7 +462,7 @@ class JmapSession:
             not isinstance(answer, list) or len(answer) != 3 for answer in answers
         ):
             raise JmapError(0, CODE_HTTP, "the JMAP answer was malformed")
-        return [
+        parsed = [
             JmapAnswer(
                 str(method),
                 payload if isinstance(payload, dict) else {},
@@ -327,6 +470,145 @@ class JmapSession:
             )
             for method, payload, call_id in answers
         ]
+        return _ordered_by_call_id(parsed, calls)
+
+    def download_blob(
+        self,
+        blob_id: str,
+        name: str,
+        cancelled: threading.Event | None = None,
+    ) -> bytes:
+        """The bytes of one blob: a body part or attachment fetched by id."""
+        raise_if_cancelled(cancelled)
+        url = self._session.download_url(blob_id, name)
+        _assert_same_origin(url, self._session.api_url)
+        request = urllib.request.Request(
+            url,
+            headers={"Authorization": self._authorization, "Accept": "*/*"},
+        )
+        response = self._transport(request)
+        if response.status >= 400:
+            raise _error_from(response)
+        return response.body
+
+    def upload_blob(
+        self,
+        data: bytes,
+        content_type: str = "application/octet-stream",
+        cancelled: threading.Event | None = None,
+    ) -> str:
+        """Upload raw bytes (a composed message) and return their blob id."""
+        raise_if_cancelled(cancelled)
+        if not self.is_writable:
+            raise JmapError(0, CODE_READ_ONLY, "upload needs a writable session")
+        url = self._session.upload_url()
+        _assert_same_origin(url, self._session.api_url)
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Authorization": self._authorization,
+                "Content-Type": content_type,
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        response = self._transport(request)
+        if response.status >= 400:
+            raise _error_from(response)
+        try:
+            payload = response.json()
+        except ValueError:
+            raise JmapError(
+                0, CODE_HTTP, "the JMAP upload answer was not JSON"
+            ) from None
+        blob_id = payload.get("blobId") if isinstance(payload, dict) else None
+        if not isinstance(blob_id, str) or not blob_id:
+            raise JmapError(0, CODE_HTTP, "the JMAP upload answered without a blob id")
+        return blob_id
+
+    def watch_push(
+        self,
+        stream: StreamFactory,
+        on_change: Callable[[StateChange], None],
+        cancelled: threading.Event | None = None,
+        config: PushConfig | None = None,
+    ) -> None:
+        """Hold the server's event source open, calling on_change per state
+        change, until cancelled. Dropped connections reconnect with backoff;
+        when the budget runs out pushUnavailable is raised and the caller
+        falls back to polling."""
+        active = config or PushConfig()
+        url = self._session.event_source_url(
+            active.types, active.close_after, active.ping
+        )
+        _assert_same_origin(url, self._session.api_url)
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": self._authorization,
+                "Accept": "text/event-stream",
+            },
+        )
+        failures = 0
+        while True:
+            raise_if_cancelled(cancelled)
+            try:
+                for chunk in stream(request, cancelled):
+                    raise_if_cancelled(cancelled)
+                    for change in parse_state_changes(chunk):
+                        on_change(change)
+            except JmapError:
+                raise
+            except Exception as error:
+                failures += 1
+                if failures > active.max_reconnects:
+                    raise JmapError(
+                        0,
+                        CODE_PUSH_FAILED,
+                        "push reconnects ran out; poll instead",
+                    ) from error
+                delay = reconnect_delay(failures, active.base_delay, active.max_delay)
+                logger.debug("JMAP push dropped; reconnecting in %.0fs", delay)
+                active.sleep(delay)
+                continue
+            # The server closed the stream (closeafter): resume with a fresh
+            # connection and a reset failure budget, pausing first so a server
+            # that closes every stream at once cannot spin the loop hot.
+            failures = 0
+            active.sleep(active.base_delay)
+
+
+def _check_calls(calls: list[JmapCall], writable: bool) -> None:
+    """Refuse before the network what must never go out: non-mail methods,
+    writes on a read-only session, and reused call ids."""
+    seen_ids: set[str] = set()
+    for call in calls:
+        if call.method not in MAIL_METHODS:
+            raise JmapError(0, CODE_READ_ONLY, f"{call.method} is not a JMAP mail call")
+        if call.method in WRITE_METHODS and not writable:
+            raise JmapError(
+                0, CODE_READ_ONLY, f"{call.method} needs a writable session"
+            )
+        if call.call_id in seen_ids:
+            raise JmapError(
+                0, CODE_INVALID_ARGUMENTS, f"call id {call.call_id} is used twice"
+            )
+        seen_ids.add(call.call_id)
+
+
+def _ordered_by_call_id(
+    answers: list[JmapAnswer], calls: list[JmapCall]
+) -> list[JmapAnswer]:
+    """The answers in call order, matched by call id rather than position: a
+    response the server reordered still lands on its own call."""
+    by_id = {answer.call_id: answer for answer in answers}
+    if len(by_id) != len(answers):
+        raise JmapError(0, CODE_HTTP, "the JMAP answer repeated a call id")
+    try:
+        return [by_id[call.call_id] for call in calls]
+    except KeyError:
+        raise JmapError(0, CODE_HTTP, "the JMAP answer missed a call id") from None
 
 
 def _auth_header(credential: Credential) -> str:
@@ -393,7 +675,7 @@ def _mail_account(payload: dict) -> str:
     raise JmapError(0, CODE_BAD_SESSION, "the session resource names no mail account")
 
 
-def _limits(payload: dict) -> tuple[int, int]:
+def _limits(payload: dict) -> tuple[int, int, int]:
     """The core capability's paging bounds, defaulted when the server omits
     them."""
     capabilities = payload.get("capabilities")
@@ -407,7 +689,17 @@ def _limits(payload: dict) -> tuple[int, int]:
     return (
         bound("maxCallsInRequest", _DEFAULT_MAX_CALLS),
         bound("maxObjectsInGet", _DEFAULT_MAX_OBJECTS_IN_GET),
+        bound("maxObjectsInSet", _DEFAULT_MAX_OBJECTS_IN_SET),
     )
+
+
+def _is_read_only(payload: dict, account_id: str) -> bool:
+    """Whether the server marked the chosen account read-only: writes to it
+    are refused before they reach the network."""
+    accounts = payload.get("accounts")
+    detail = accounts.get(account_id) if isinstance(accounts, dict) else None
+    detail = detail if isinstance(detail, dict) else {}
+    return detail.get("isReadOnly") is True
 
 
 def _api_url(payload: dict, session_origin: tuple[str, str, int]) -> str:
@@ -448,3 +740,70 @@ def _checked_url(payload: dict, key: str, session_origin: tuple[str, str, int]) 
             0, CODE_BAD_SESSION, f"{key} is outside the session at {origin[1]}"
         )
     return url
+
+
+def _assert_same_origin(url: str, trusted: str) -> None:
+    """Refuse a blob or push URL that left the api origin: discovery already
+    checked the templates, so this only trips on a tampered Session."""
+    if _origin(url) != _origin(trusted):
+        raise JmapError(
+            0, CODE_BAD_SESSION, f"the URL is outside the session at {_origin(url)[1]}"
+        )
+
+
+def urlopen_event_stream(
+    request: urllib.request.Request, cancelled: threading.Event | None = None
+) -> Iterator[str]:
+    """The event source for real, one line at a time. A blocking read cannot
+    notice cancellation until the next line (or ping) arrives, so this runs on
+    a thread the caller owns."""
+    with urllib.request.urlopen(request, timeout=NET_TIMEOUT_SECONDS) as reply:
+        for raw in reply:
+            raise_if_cancelled(cancelled)
+            yield raw.decode("utf-8", "replace")
+
+
+def parse_state_changes(text: str) -> list[StateChange]:
+    """The state events in one event-source chunk. Pings, comments and other
+    event types are ignored; a malformed state event is logged and skipped,
+    since the next sync reconciles whatever it announced."""
+    changes = []
+    for block in text.split("\n\n"):
+        event = "message"
+        data: list[str] = []
+        for line in block.splitlines():
+            if line.startswith(":") or not line.strip():
+                continue
+            name, _, value = line.partition(":")
+            if name.strip() == "event":
+                event = value.strip()
+            elif name.strip() == "data":
+                data.append(value.lstrip(" "))
+        if event != "state" or not data:
+            continue
+        try:
+            payload = json.loads("\n".join(data))
+            changed = payload["changed"]
+        except (ValueError, KeyError, TypeError):
+            logger.warning("could not parse a JMAP push event")
+            continue
+        if not isinstance(changed, dict):
+            logger.warning("could not parse a JMAP push event")
+            continue
+        changes.append(
+            StateChange(
+                {
+                    str(account): frozenset(
+                        name for name in detail if isinstance(name, str)
+                    )
+                    for account, detail in changed.items()
+                    if isinstance(detail, dict)
+                }
+            )
+        )
+    return changes
+
+
+def reconnect_delay(attempt: int, base: float, cap: float) -> float:
+    """Backoff before redialling push: exponential from base, capped."""
+    return max(0.0, min(base * 2.0 ** max(0, attempt - 1), cap))
