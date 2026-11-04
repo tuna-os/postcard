@@ -1167,6 +1167,15 @@ def _fetch_jmap_mailbox(
     )
 
 
+def _apply_mailbox_delta(
+    merged: dict[str, jmap_folders.JmapMailbox], delta: jmap_folders.MailboxDelta
+) -> None:
+    for gone in delta.destroyed_ids:
+        merged.pop(gone, None)
+    for box in delta.changed:
+        merged[box.id] = box
+
+
 def _jmap_mailboxes(
     jmap: JmapSession, state: _JmapState
 ) -> list[jmap_folders.JmapMailbox]:
@@ -1179,15 +1188,25 @@ def _jmap_mailboxes(
             if not needs_full_sync(error):
                 raise
         else:
-            for gone in delta.destroyed_ids:
-                state.mailboxes.pop(gone, None)
-            for box in delta.changed:
-                state.mailboxes[box.id] = box
+            _apply_mailbox_delta(state.mailboxes, delta)
             state.mailbox_state = delta.new_state
             return list(state.mailboxes.values())
-    boxes = jmap_folders.list_mailboxes(jmap)
-    state.mailboxes = {box.id: box for box in boxes}
-    state.mailbox_state = jmap_folders.current_mailbox_state(jmap)
+    # State first, then the listing, then one delta to catch the window
+    # between them: a mailbox created after the list but before the cursor
+    # would otherwise miss both and stay invisible until the state expires.
+    since = jmap_folders.current_mailbox_state(jmap)
+    merged = {box.id: box for box in jmap_folders.list_mailboxes(jmap)}
+    try:
+        delta = jmap_folders.mailbox_changes(jmap, since)
+    except JmapError as error:
+        if not needs_full_sync(error):
+            raise
+        state.mailboxes = merged
+        state.mailbox_state = jmap_folders.current_mailbox_state(jmap)
+        return list(state.mailboxes.values())
+    _apply_mailbox_delta(merged, delta)
+    state.mailboxes = merged
+    state.mailbox_state = delta.new_state
     return list(state.mailboxes.values())
 
 
@@ -1219,7 +1238,18 @@ def _jmap_newest(
     walked = jmap_messages.query_all_ids(jmap, target)
     found, _missing = jmap_messages.fetch_emails(jmap, walked.ids[:limit])
     full = set(walked.ids)
-    state.queries[target] = _JmapQuery(walked.query_state, frozenset(full))
+    query_state = walked.query_state
+    # A long walk spans states: one delta from where it ended catches mail
+    # that arrived mid-walk, which the pages may never have covered.
+    try:
+        changed = jmap_messages.query_changes(jmap, target, walked.query_state)
+    except JmapError as error:
+        if not needs_full_sync(error):
+            raise
+    else:
+        full = (full - set(changed.removed_ids)) | set(changed.ids)
+        query_state = changed.query_state
+    state.queries[target] = _JmapQuery(query_state, frozenset(full))
     return [jmap_messages.message_header(item) for item in found], full
 
 

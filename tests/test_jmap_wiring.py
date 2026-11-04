@@ -165,6 +165,22 @@ def mailbox_state(state="mb1"):
     return ["Mailbox/get", {"list": [], "state": state}, "0"]
 
 
+def mailbox_changes_empty(new_state):
+    return [
+        "Mailbox/changes",
+        {"created": [], "updated": [], "destroyed": [], "newState": new_state},
+        "0",
+    ]
+
+
+def query_changes_empty(new_state):
+    return [
+        "Email/queryChanges",
+        {"added": [], "removed": [], "newQueryState": new_state},
+        "0",
+    ]
+
+
 def email_row(uid, subject="Quartalszahlen", message_id=None):
     return {
         "id": uid,
@@ -198,15 +214,17 @@ def isolated_jmap(monkeypatch):
 
 
 def first_sync_script(*extra):
-    """Discovery plus a first inbox sync over three messages, newest first."""
+    """Discovery plus a first inbox sync over three messages, newest first,
+    with the reconcile passes that close the snapshot windows."""
     return [
         reply(SESSION),
+        answers(mailbox_state("mb0")),
         answers(mailbox_list()),
-        answers(mailbox_state("mb1")),
+        answers(mailbox_changes_empty("mb1")),
         answers(
             [
                 "Email/query",
-                {"ids": ["M3", "M2", "M1"], "total": 3, "queryState": "qs1"},
+                {"ids": ["M3", "M2", "M1"], "total": 3, "queryState": "qs0"},
                 "0",
             ]
         ),
@@ -220,6 +238,7 @@ def first_sync_script(*extra):
                 "0",
             ]
         ),
+        answers(query_changes_empty("qs1")),
         *extra,
     ]
 
@@ -245,12 +264,114 @@ def test_first_sync_walks_folders_and_inbox_over_jmap(monkeypatch):
     assert [method for method, _args, _id in sent_calls(transport)] == [
         "Mailbox/get",
         "Mailbox/get",
+        "Mailbox/changes",
         "Email/query",
         "Email/get",
+        "Email/queryChanges",
     ]
     state = mail_sync._jmap_states[7]
     assert state.mailbox_state == "mb1"
     assert state.queries[INBOX].state == "qs1"
+
+
+def test_a_mailbox_created_during_the_first_list_is_reconciled(monkeypatch):
+    # The state is captured before the listing, so one delta after it catches
+    # a mailbox the list never covered; without the pass it would stay
+    # invisible until the state expired.
+    new_box = mailbox_row("FbNewOpaque2", "Neu", None, total=1)
+    transport = FakeTransport(
+        reply(SESSION),
+        answers(mailbox_state("mb0")),
+        answers(mailbox_list()),
+        answers(
+            [
+                "Mailbox/changes",
+                {
+                    "created": ["FbNewOpaque2"],
+                    "updated": [],
+                    "destroyed": [],
+                    "newState": "mb1",
+                },
+                "0",
+            ]
+        ),
+        answers(["Mailbox/get", {"list": [new_box], "state": "mb1"}, "0"]),
+        answers(
+            [
+                "Email/query",
+                {"ids": ["M3", "M2", "M1"], "total": 3, "queryState": "qs0"},
+                "0",
+            ]
+        ),
+        answers(
+            [
+                "Email/get",
+                {
+                    "list": [email_row("M3"), email_row("M2"), email_row("M1")],
+                    "notFound": [],
+                },
+                "0",
+            ]
+        ),
+        answers(query_changes_empty("qs1")),
+    )
+    bind_jmap(monkeypatch, transport)
+
+    result = mail_sync.fetch_mailbox(fastmail_account(), CREDENTIAL)
+
+    assert {box.name for box in result.folders} == {
+        INBOX,
+        SENT,
+        DRAFTS,
+        ARCHIVE,
+        "FbNewOpaque2",
+    }
+    assert mail_sync._jmap_states[7].mailbox_state == "mb1"
+
+
+def test_mail_arriving_during_the_first_walk_is_reconciled(monkeypatch):
+    # A long walk spans states; one delta from where it ended folds mail
+    # that arrived mid-walk into the prune set instead of dropping it.
+    transport = FakeTransport(
+        reply(SESSION),
+        answers(mailbox_state("mb0")),
+        answers(mailbox_list()),
+        answers(mailbox_changes_empty("mb1")),
+        answers(
+            [
+                "Email/query",
+                {"ids": ["M3", "M2", "M1"], "total": 3, "queryState": "qs0"},
+                "0",
+            ]
+        ),
+        answers(
+            [
+                "Email/get",
+                {
+                    "list": [email_row("M3"), email_row("M2"), email_row("M1")],
+                    "notFound": [],
+                },
+                "0",
+            ]
+        ),
+        answers(
+            [
+                "Email/queryChanges",
+                {
+                    "added": [{"threadId": "TM4", "emailId": "M4"}],
+                    "removed": [],
+                    "newQueryState": "qs1",
+                },
+                "0",
+            ]
+        ),
+    )
+    bind_jmap(monkeypatch, transport)
+
+    result = mail_sync.fetch_mailbox(fastmail_account(), CREDENTIAL)
+
+    assert result.all_uids == {"M1", "M2", "M3", "M4"}
+    assert mail_sync._jmap_states[7].queries[INBOX].state == "qs1"
 
 
 def test_second_sync_walks_folders_via_delta(monkeypatch):
@@ -308,14 +429,16 @@ def test_second_sync_walks_folders_via_delta(monkeypatch):
 
     assert [message.uid for message in result.messages] == ["M4", "M3", "M2"]
     assert result.all_uids == {"M2", "M3", "M4"}
-    assert [method for method, _args, _id in sent_calls(transport)][4:] == [
+    assert [method for method, _args, _id in sent_calls(transport)][6:] == [
         "Mailbox/changes",
         "Email/queryChanges",
         "Email/query",
         "Email/get",
     ]
     [[_method, arguments, _id]] = [
-        call for call in sent_calls(transport) if call[0] == "Email/queryChanges"
+        call
+        for call in sent_calls(transport)
+        if call[0] == "Email/queryChanges" and call[1]["sinceQueryState"] == "qs1"
     ]
     assert arguments["sinceQueryState"] == "qs1"
     assert mail_sync._jmap_states[7].queries[INBOX].state == "qs2"
@@ -456,6 +579,7 @@ def test_expired_query_state_triggers_a_full_walk(monkeypatch):
                     "0",
                 ]
             ),
+            answers(query_changes_empty("qs9")),
         )
     )
     bind_jmap(monkeypatch, transport)
@@ -475,8 +599,9 @@ def test_expired_mailbox_state_relists_the_tree(monkeypatch):
             answers(
                 ["error", {"type": "cannotCalculateChanges", "description": "old"}, "0"]
             ),
+            answers(mailbox_state("mb8")),
             answers(mailbox_list()),
-            answers(mailbox_state("mb9")),
+            answers(mailbox_changes_empty("mb9")),
             answers(
                 [
                     "Email/queryChanges",
@@ -549,13 +674,14 @@ def test_paging_older_mail_leaves_the_cursors_alone(monkeypatch):
     bind_jmap(monkeypatch, transport)
     account = fastmail_account()
     mail_sync.fetch_mailbox(account, CREDENTIAL)
+    paged_calls = len(sent_calls(transport))
 
     result = mail_sync.fetch_mailbox(account, CREDENTIAL, limit=1, offset=2)
 
     assert [message.uid for message in result.messages] == ["M1"]
     assert result.all_uids is None
     assert "Email/queryChanges" not in [
-        method for method, _args, _id in sent_calls(transport)
+        method for method, _args, _id in sent_calls(transport)[paged_calls:]
     ]
     assert mail_sync._jmap_states[7].queries[INBOX].state == "qs1"
 
@@ -564,8 +690,9 @@ def test_a_folder_is_addressed_by_its_id(monkeypatch):
     sent_ids = [f"Ms{i}" for i in range(12)]
     transport = FakeTransport(
         reply(SESSION),
+        answers(mailbox_state("mb0")),
         answers(mailbox_list()),
-        answers(mailbox_state("mb1")),
+        answers(mailbox_changes_empty("mb1")),
         answers(
             [
                 "Email/query",
@@ -580,6 +707,7 @@ def test_a_folder_is_addressed_by_its_id(monkeypatch):
                 "0",
             ]
         ),
+        answers(query_changes_empty("qs-sent")),
     )
     bind_jmap(monkeypatch, transport)
 
@@ -1141,8 +1269,10 @@ def test_fastmail_account_syncs_reads_flags_moves_and_sends(monkeypatch):
     assert [method for method, _args, _id in sent_calls(transport)] == [
         "Mailbox/get",
         "Mailbox/get",
+        "Mailbox/changes",
         "Email/query",
         "Email/get",
+        "Email/queryChanges",
         "Email/get",
         "Email/set",
         "Email/set",
