@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-04 22:35+0000\n"
+"POT-Creation-Date: 2026-11-04 22:47+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -703,11 +703,11 @@ msgstr ""
 msgid "Enter the six-digit code from your authenticator app."
 msgstr ""
 
-#: src/postcard/proton_dialog.py:164 src/postcard/tuta_dialog.py:166
+#: src/postcard/proton_dialog.py:167 src/postcard/tuta_dialog.py:166
 msgid "That code didn't work. It may have expired; enter the current one."
 msgstr ""
 
-#: src/postcard/provider_dialog.py:70
+#: src/postcard/provider_dialog.py:72
 msgid "Signs in through your browser"
 msgstr ""
 
