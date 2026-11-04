@@ -153,6 +153,8 @@ def build_mime_message(
     subject: str,
     body_html: str,
     attachments: list[Attachment],
+    in_reply_to: str = "",
+    references: str = "",
 ) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = from_addr
@@ -162,6 +164,10 @@ def build_mime_message(
     msg["Subject"] = subject
     msg["Date"] = email.utils.formatdate(localtime=True)
     msg["Message-ID"] = email.utils.make_msgid()
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
     msg.set_content(html_to_text(body_html))
     msg.add_alternative(body_html, subtype="html")
 
@@ -183,8 +189,8 @@ def build_mime_message(
 
 def extract_recipients(raw: bytes) -> list[str]:
     """Read the To/Cc headers back out of a stored message, for retrying from
-    Outbox. Bcc addresses are never written to the stored message, so a Bcc'd
-    recipient is lost if the original send failed and is retried later.
+    Outbox. Bcc addresses are never written to the stored message, so this is
+    only the fallback for mail queued before the queue table kept its envelope.
     """
     headers = email.message_from_bytes(raw)
     addrs = email.utils.getaddresses(

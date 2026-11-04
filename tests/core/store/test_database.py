@@ -16,6 +16,7 @@ from postcard.core.store.database import (
     MIGRATIONS,
     CacheError,
     Database,
+    OutboxState,
     _arrival_key,
     _fts_query,
     _sent_key,
@@ -1429,3 +1430,169 @@ def test_a_newer_encrypted_schema_is_refused_without_touching_mail(tmp_path):
     assert reopened.get_raw_message(mail.id) == b"From: ada@x stating hi"
     assert [m.subject for m in reopened.emails_in_folder(folder.id)] == ["Hi"]
     reopened.close()
+
+
+# --- outbox queue ------------------------------------------------------------
+# One row per mail waiting to go out: draft -> ready -> sending -> sent, with
+# failed attempts landing on retry (or terminal failed).
+
+
+def _queued(db, subject="Hi", raw=b"To: you@x\r\nMessage-ID: <a@x>\r\n\r\n"):
+    account = db.save_account(
+        "me@example.com", "Me", "imap.example.com", 993, "smtp.example.com", 587
+    )
+    outbox = db.get_or_create_folder(account.id, "Outbox")
+    mail = db.save_email(outbox.id, "you@x", subject, subject, "now", False)
+    db.save_raw_message(mail.id, raw)
+    return outbox, mail
+
+
+def test_queueing_keeps_the_envelope_claiming_counts_the_attempt(db):
+    outbox, mail = _queued(db)
+    db.queue_outbox_email(mail.id, ["you@x", "bcc@x"])
+
+    claimed = db.claim_outbox_email(mail.id)
+
+    assert claimed is not None
+    assert claimed.email_id == mail.id
+    assert claimed.state is OutboxState.SENDING
+    assert claimed.attempts == 1
+    assert claimed.envelope == ["you@x", "bcc@x"]
+    assert claimed.message_id == "<a@x>"
+    assert claimed.raw.startswith(b"To: you@x")
+
+
+def test_a_second_claim_while_sending_holds_nothing(db):
+    _outbox, mail = _queued(db)
+    db.queue_outbox_email(mail.id, ["you@x"])
+
+    assert db.claim_outbox_email(mail.id) is not None
+    assert db.claim_outbox_email(mail.id) is None
+
+
+def test_completing_forgets_the_send(db):
+    outbox, mail = _queued(db)
+    db.queue_outbox_email(mail.id, ["you@x"])
+    db.claim_outbox_email(mail.id)
+
+    db.complete_outbox_email(mail.id)
+    # The caller files the Sent copy and deletes the Outbox row, which would
+    # cascade here anyway; without that the mail reads as legacy mail again.
+    db.delete_email(mail.id)
+
+    assert db.queued_send(mail.id) is None
+    assert db.pending_outbox_sends(outbox.id) == []
+
+
+def test_failing_records_retry_with_the_reason(db):
+    _outbox, mail = _queued(db)
+    db.queue_outbox_email(mail.id, ["you@x"])
+    db.claim_outbox_email(mail.id)
+
+    db.fail_outbox_email(mail.id, "connection timed out", OutboxState.RETRY)
+
+    failed = db.queued_send(mail.id)
+    assert failed is not None
+    assert failed.state is OutboxState.RETRY
+    assert failed.attempts == 1
+    assert failed.last_error == "connection timed out"
+    assert failed.envelope == ["you@x"]
+
+
+def test_only_a_claimed_row_can_fail(db):
+    _outbox, mail = _queued(db)
+    db.queue_outbox_email(mail.id, ["you@x"])
+
+    db.fail_outbox_email(mail.id, "never claimed", OutboxState.RETRY)
+
+    assert db.queued_send(mail.id).state is OutboxState.READY
+
+
+def test_recovery_readies_interrupted_sends_but_spares_live_claims(db):
+    _outbox, first = _queued(db, subject="first")
+    _outbox, second = _queued(db, subject="second")
+    for mail in (first, second):
+        db.queue_outbox_email(mail.id, ["you@x"])
+        db.claim_outbox_email(mail.id)
+
+    recovered = db.recover_interrupted_sends(except_ids={second.id})
+
+    assert recovered == 1
+    assert db.queued_send(first.id).state is OutboxState.READY
+    assert db.queued_send(first.id).attempts == 1
+    assert db.queued_send(second.id).state is OutboxState.SENDING
+
+
+def test_pending_lists_ready_retry_and_sending_but_never_failed(db):
+    outbox, ready = _queued(db, subject="ready")
+    others = []
+    for subject in ("retry", "sending", "failed"):
+        mail = db.save_email(outbox.id, "you@x", subject, subject, "now", False)
+        db.save_raw_message(mail.id, b"To: you@x\r\n\r\n")
+        others.append(mail)
+    retry, sending, failed = others
+    for mail in (ready, retry, sending, failed):
+        db.queue_outbox_email(mail.id, ["you@x"])
+        db.claim_outbox_email(mail.id)
+    db.fail_outbox_email(retry.id, "boom", OutboxState.RETRY)
+    db.fail_outbox_email(failed.id, "boom", OutboxState.FAILED)
+
+    assert [send.subject for send in db.pending_outbox_sends(outbox.id)] == [
+        "ready",
+        "retry",
+        "sending",
+    ]
+
+
+def test_pending_reads_legacy_mail_as_ready_without_an_envelope(db):
+    outbox, mail = _queued(db)
+    # No queue_outbox_email: queued before the queue table existed.
+
+    [send] = db.pending_outbox_sends(outbox.id)
+
+    assert send.email_id == mail.id
+    assert send.state is OutboxState.READY
+    assert send.envelope is None
+    assert send.attempts == 0
+
+
+def test_pending_skips_mail_without_a_body(db):
+    outbox, mail = _queued(db)
+    db._conn.execute("UPDATE emails SET raw_message = NULL WHERE id = ?", (mail.id,))
+    db._conn.commit()
+
+    assert db.pending_outbox_sends(outbox.id) == []
+
+
+def test_requeueing_never_clobbers_a_send_in_flight(db):
+    _outbox, mail = _queued(db)
+    db.queue_outbox_email(mail.id, ["you@x", "bcc@x"])
+    db.claim_outbox_email(mail.id)
+
+    db.queue_outbox_email(mail.id, ["you@x"])
+
+    assert db.queued_send(mail.id).envelope == ["you@x", "bcc@x"]
+    assert db.queued_send(mail.id).state is OutboxState.SENDING
+
+
+def test_deleting_the_mail_drops_its_queue_row(db):
+    _outbox, mail = _queued(db)
+    db.queue_outbox_email(mail.id, ["you@x"])
+    db.claim_outbox_email(mail.id)
+
+    db.delete_email(mail.id)
+
+    assert db.queued_send(mail.id) is None
+
+
+def test_filing_twice_replaces_the_earlier_copy(db):
+    account = db.save_account(
+        "me@example.com", "Me", "imap.example.com", 993, "smtp.example.com", 587
+    )
+    sent = db.get_or_create_folder(account.id, "Sent")
+    first = db.save_email(sent.id, "me@x", "Hi", "Hi", "now", False, server_id="7")
+    db.save_raw_message(first.id, b"Message-ID: <a@x>\r\n\r\n")
+
+    db.delete_emails_by_message_id(sent.id, "<a@x>")
+
+    assert db.emails_in_folder(sent.id) == []

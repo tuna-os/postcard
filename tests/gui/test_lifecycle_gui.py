@@ -292,6 +292,9 @@ def test_a_composer_send_past_removal_files_no_sent_copy(db, settings, offline):
     outbox = db.get_or_create_folder(account.id, mail_sync.OUTBOX_FOLDER)
     queued = db.save_email(outbox.id, "Ada", "queued", "queued", "now", False)
     db.save_raw_message(queued.id, b"raw-bytes")
+    db.queue_outbox_email(queued.id, ["you@example.com"])
+    job = mail_sync.claim_queued_send(db, queued.id)
+    assert job is not None
     composer = PostcardComposerWindow(None, db, account)
     token = composer._lifecycle.mint(account.id)
 
@@ -299,10 +302,8 @@ def test_a_composer_send_past_removal_files_no_sent_copy(db, settings, offline):
     new = _account(db, "new@example.com")
     assert new.id == account.id
 
-    assert (
-        composer._on_send_done(account, queued.id, "queued", b"raw-bytes", token)
-        is False
-    )
+    outcome = mail_sync.SendOutcome(None, None, None)
+    assert composer._on_send_done(account, job, outcome, token) is False
 
     assert db.folders_for_account(new.id) == []
     assert _all_subjects(db) == []
@@ -313,15 +314,16 @@ def test_a_live_composer_send_files_its_sent_copy(db, settings, offline):
     outbox = db.get_or_create_folder(account.id, mail_sync.OUTBOX_FOLDER)
     queued = db.save_email(outbox.id, "Ada", "queued", "queued", "now", False)
     db.save_raw_message(queued.id, b"raw-bytes")
+    db.queue_outbox_email(queued.id, ["you@example.com"])
+    job = mail_sync.claim_queued_send(db, queued.id)
+    assert job is not None
     composer = PostcardComposerWindow(None, db, account)
     finished = []
     composer.connect("finished", lambda _c, failure: finished.append(failure))
     token = composer._lifecycle.mint(account.id)
 
-    assert (
-        composer._on_send_done(account, queued.id, "queued", b"raw-bytes", token)
-        is False
-    )
+    outcome = mail_sync.SendOutcome(None, None, None)
+    assert composer._on_send_done(account, job, outcome, token) is False
 
     assert finished == [""]
     assert _all_subjects(db) == ["queued"]

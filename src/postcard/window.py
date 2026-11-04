@@ -4,7 +4,6 @@ import shutil
 import threading
 import time
 from collections.abc import Callable, Iterator
-from datetime import datetime
 from email import policy
 from email.utils import parseaddr
 from functools import partial
@@ -35,7 +34,7 @@ from .core.models.conversation import Conversation
 from .core.models.email import Email
 from .core.models.folder import Folder
 from .core.net import errors, imap_session, ms_oauth
-from .core.store.database import Database
+from .core.store.database import Database, QueuedSend
 from .folder_row import FolderRow
 from .message_view import LoadCallback, MessageView
 from .microsoft_dialog import PostcardMicrosoftDialog
@@ -2420,6 +2419,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _drain_outbox(self, account: Account) -> None:
         if self._lifecycle.is_shutdown:
             return
+        # Sending into nothing only burns attempts: the mail stays queued, and
+        # the return of the network drains it.
+        if not self._is_online:
+            return
         if account.id in self._draining_account_ids:
             return
 
@@ -2427,16 +2430,20 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         if outbox is None:
             return
 
-        pending = self._db.emails_in_folder(outbox.id)
-        if not pending:
-            return
-
+        # Sends a crash interrupted read as ready again -- except the ones a
+        # live send in this process holds, which must not go out twice.
+        mail_sync.recover_queued_sends(self._db)
         jobs = []
-        for mail in pending:
-            raw = self._db.get_raw_message(mail.id)
-            if raw is None:
-                continue
-            jobs.append((mail.id, mail.subject, compose.extract_recipients(raw), raw))
+        for send in self._db.pending_outbox_sends(outbox.id):
+            if send.envelope is None:
+                # Queued before the queue table kept envelopes: the To/Cc
+                # headers are all that is left, and a Bcc is already lost.
+                self._db.queue_outbox_email(
+                    send.email_id, compose.extract_recipients(send.raw)
+                )
+            claimed = mail_sync.claim_queued_send(self._db, send.email_id)
+            if claimed is not None:
+                jobs.append(claimed)
         if not jobs:
             return
 
@@ -2456,34 +2463,52 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self,
         account: Account,
         token: JobToken,
-        jobs: list[tuple[int, str, list[str], bytes]],
+        jobs: list[QueuedSend],
     ) -> None:
         credential = secrets.credential_for(account)
         if credential is None:
             logger.warning(
                 "could not sign in to %s; the Outbox stays queued", account.email
             )
-            # Still report back, so the account isn't left marked as draining.
-            GLib.idle_add(self._on_outbox_drained, account, token, [])
+            sign_in_error = _("Could not sign in to this account.")
+            GLib.idle_add(
+                self._on_outbox_drained,
+                account,
+                token,
+                [
+                    OutboxResult(
+                        job.email_id, job.subject, job.raw, Exception(sign_in_error)
+                    )
+                    for job in jobs
+                ],
+            )
             return
 
         results: list[OutboxResult] = []
-        for email_id, subject, recipients, raw in jobs:
+        for job in jobs:
             try:
-                mail_sync.send_message(
-                    account, credential, account.email, recipients, raw
-                )
+                outcome = mail_sync.send_queued(account, credential, job)
             except Exception as error:
                 logger.exception(
                     "could not send queued message %d (%r) to %s via %s",
-                    email_id,
-                    subject,
-                    ", ".join(recipients),
+                    job.email_id,
+                    job.subject,
+                    ", ".join(job.envelope or ()),
                     account.smtp_host,
                 )
-                results.append(OutboxResult(email_id, subject, raw, error))
+                results.append(OutboxResult(job.email_id, job.subject, job.raw, error))
             else:
-                results.append(OutboxResult(email_id, subject, raw, None))
+                results.append(
+                    OutboxResult(
+                        job.email_id,
+                        job.subject,
+                        job.raw,
+                        None,
+                        outcome.filed_uid,
+                        outcome.uidvalidity,
+                        outcome.file_error,
+                    )
+                )
         GLib.idle_add(self._on_outbox_drained, account, token, results)
 
     # Files under the account that sent, not the open one; dropping a result
@@ -2495,41 +2520,70 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self, account: Account, token: JobToken, results: list[OutboxResult]
     ) -> bool:
         self._draining_account_ids.discard(account.id)
+        for result in results:
+            mail_sync.release_queued_send(result.email_id)
         if not self._lifecycle.is_live(token):
             return False
-        sent: Folder | None = None
         sent_count = 0
+        file_errors: list[Exception] = []
         for result in results:
             if result.error is not None:
+                mail_sync.fail_queued_send(self._db, result.email_id, str(result.error))
                 continue
-            if sent is None:
-                sent = mail_sync.sent_folder(self._db, account.id)
-            # extract_recipients keeps only the addresses, so this row's initials
-            # come from the address where a freshly composed one has a name.
-            recipient = next(iter(compose.extract_recipients(result.raw)), "")
-            row = self._db.save_email(
-                sent.id,
-                sender=account.email,
-                sender_address=account.email,
-                recipient=recipient,
-                recipient_address=recipient,
-                subject=result.subject,
-                preview=result.subject,
-                date=datetime.now().astimezone().isoformat(),
-                is_unread=False,
-            )
-            self._db.save_raw_message(row.id, result.raw)
-            self._db.delete_email(result.email_id)
-            sent_count += 1
+            filed, file_error = self._file_drained_result(account, result)
+            if file_error is not None:
+                file_errors.append(file_error)
+            if filed:
+                sent_count += 1
 
         if sent_count:
             self._reload_folders()
             self._refresh_conversations()
             self._toast(_("Sent {n} queued message(s).").format(n=sent_count))
 
+        # A send that succeeded but filed no Sent copy must be said, not
+        # retried: sending it again would deliver it twice.
+        if file_errors:
+            _is_auth_failure, message = errors.classify(
+                file_errors[0], account.imap_host
+            )
+            self._toast(
+                _("Sent, but the copy couldn't be saved to Sent: {msg}.").format(
+                    msg=message
+                )
+            )
+
         # Queued mail that could not be sent is still in the Outbox, so say so
         # -- silently leaving it there reads as "sent" to the user.
         send_errors = [result.error for result in results if result.error is not None]
+        self._show_drain_errors(account, send_errors)
+        return False
+
+    def _file_drained_result(
+        self, account: Account, result: OutboxResult
+    ) -> tuple[bool, Exception | None]:
+        """File one drained send's Sent copy. Returns (filed?, file_error)."""
+        job = self._db.queued_send(result.email_id)
+        if job is None:
+            # Deleted from the Outbox mid-drain: the mail went out, and the
+            # server's Sent copy still syncs down.
+            return False, None
+        # extract_recipients keeps only the addresses, so this row's initials
+        # come from the address where a freshly composed one has a name.
+        recipient = next(iter(compose.extract_recipients(result.raw)), "")
+        outcome = mail_sync.SendOutcome(
+            result.filed_uid, result.uidvalidity, result.file_error
+        )
+        sent, validity_changed = mail_sync.file_sent_email(
+            self._db, account, job, outcome, (recipient, recipient)
+        )
+        if validity_changed:
+            self._lifecycle.invalidate_folder(account.id, sent.name)
+        return True, result.file_error
+
+    def _show_drain_errors(
+        self, account: Account, send_errors: list[Exception]
+    ) -> None:
         if send_errors:
             is_auth_failure, message = errors.classify(
                 send_errors[0], account.smtp_host
@@ -2542,7 +2596,6 @@ class PostcardMainWindow(Adw.ApplicationWindow):
                 ).format(n=len(send_errors), reason=message),
                 self._retry_button_label(is_auth_failure),
             )
-        return False
 
     def _start_sync(
         self,

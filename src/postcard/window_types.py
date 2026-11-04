@@ -73,12 +73,20 @@ class BodyRequest:
 
 @dataclass(frozen=True, slots=True)
 class OutboxResult:
-    """One attempted send from the Outbox. error is None when it went out."""
+    """One attempted send from the Outbox. error is None when it went out.
+
+    filed_uid and uidvalidity link the Sent copy to the server's (UIDPLUS);
+    file_error is set only when the mail went out but its Sent filing failed,
+    which must be reported, never retried.
+    """
 
     email_id: int
     subject: str
     raw: bytes
     error: Exception | None
+    filed_uid: str | None = None
+    uidvalidity: int | None = None
+    file_error: Exception | None = None
 
 
 @dataclass(slots=True)

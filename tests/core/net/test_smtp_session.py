@@ -8,12 +8,17 @@ from postcard.core.net.smtp_session import SmtpError, SmtpSession
 
 
 class FakeSmtp:
-    def __init__(self):
+    def __init__(self, refused=None):
         self.calls = []
         self.greeted = False
+        self._refused = refused if refused is not None else {}
 
     def ehlo_or_helo_if_needed(self):
         self.greeted = True
+
+    def sendmail(self, from_addr, recipients, raw):
+        self.calls.append(("sendmail", from_addr, recipients, raw))
+        return self._refused
 
     def auth(self, mechanism, authobject, initial_response_ok=True):
         self.calls.append(("auth", mechanism, authobject()))
@@ -56,6 +61,27 @@ def test_quit_is_safe_when_never_connected() -> None:
     # Teardown runs from a `finally:` on every send path, so it has to tolerate
     # a session that never opened rather than mask the real error.
     SmtpSession("smtp.example.com", 465).quit()
+
+
+def test_send_raw_succeeds_when_every_recipient_accepts(monkeypatch) -> None:
+    session = connect(monkeypatch, FakeSmtp())
+
+    session.send_raw("me@example.com", ["you@example.com"], b"raw")
+
+
+def test_send_raw_raises_on_a_partial_refusal(monkeypatch) -> None:
+    # sendmail reports per-recipient refusals by returning them, not by
+    # raising -- ignoring the return value reports the mail as sent.
+    refused = {"bob@example.com": (550, b"mailbox unavailable")}
+    session = connect(monkeypatch, FakeSmtp(refused=refused))
+
+    with pytest.raises(
+        SmtpError,
+        match=r"could not send to bob@example.com.*550 mailbox unavailable",
+    ):
+        session.send_raw(
+            "me@example.com", ["you@example.com", "bob@example.com"], b"raw"
+        )
 
 
 def test_send_raw_names_the_recipients_in_the_error(monkeypatch) -> None:

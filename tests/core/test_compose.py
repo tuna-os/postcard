@@ -211,6 +211,29 @@ def test_build_mime_message_never_writes_a_bcc_header():
     assert build()["Bcc"] is None
 
 
+def test_build_mime_message_omits_threading_headers_for_a_new_message():
+    msg = build()
+
+    assert msg["In-Reply-To"] is None
+    assert msg["References"] is None
+
+
+def test_build_mime_message_threads_a_reply():
+    msg = build_mime_message(
+        from_addr="me@example.com",
+        to_addrs=["you@example.com"],
+        cc_addrs=[],
+        subject="Re: Hi",
+        body_html="<p>Hi</p>",
+        attachments=[],
+        in_reply_to="<parent@example.com>",
+        references="<grandparent@example.com> <parent@example.com>",
+    )
+
+    assert msg["In-Reply-To"] == "<parent@example.com>"
+    assert msg["References"] == "<grandparent@example.com> <parent@example.com>"
+
+
 def test_build_mime_message_attaches_files():
     msg = build(attachments=[Attachment("notes.txt", "text/plain", b"hello")])
     assert msg.get_content_type() == "multipart/mixed"
