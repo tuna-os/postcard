@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-04 12:42+0000\n"
+"POT-Creation-Date: 2026-11-04 13:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -470,7 +470,7 @@ msgid "The experimental Tuta operation failed. Try again later."
 msgstr ""
 
 #: src/postcard/fastmail_dialog.py:63 src/postcard/microsoft_dialog.py:63
-#: src/postcard/tuta_dialog.py:98
+#: src/postcard/tuta_dialog.py:101
 msgid "This account is already added."
 msgstr ""
 
@@ -614,7 +614,7 @@ msgstr ""
 msgid "Refresh Inbox"
 msgstr ""
 
-#: src/postcard/tuta_dialog.py:189
+#: src/postcard/tuta_dialog.py:192
 msgid "That code didn't work. It may have expired; enter the current one."
 msgstr ""
 
