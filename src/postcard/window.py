@@ -1,6 +1,7 @@
 import email
 import logging
 import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -2372,10 +2373,19 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # Server-supplied name; "../../.bashrc" would otherwise escape the dir.
         name = Path(filename).name or "attachment"
         directory = Path(GLib.get_user_cache_dir()) / "attachments"
-        shutil.rmtree(directory, ignore_errors=True)  # keep only the newest copy
-        path = directory / name
         try:
             directory.mkdir(parents=True, exist_ok=True)
+            # Each open gets its own spool directory: two rapid opens share the
+            # worker pool, and a shared directory let the second one's cleanup
+            # delete the first one's file before its viewer launched.
+            spool = Path(tempfile.mkdtemp(prefix="open-", dir=directory))
+            for sibling in directory.iterdir():
+                if sibling != spool:
+                    if sibling.is_dir() and not sibling.is_symlink():
+                        shutil.rmtree(sibling, ignore_errors=True)
+                    else:
+                        sibling.unlink(missing_ok=True)
+            path = spool / name
             write_file_atomically(path, content)
         except OSError:
             logger.exception("could not write attachment %s to %s", name, path)
