@@ -5,22 +5,28 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Read-only by default; only the publish job writes (pages branch, tags,
+# releases, attestations). The build job signs with the GPG secret, which is
+# not a token permission, so it stays read-only too.
 permissions:
-  contents: write
+  contents: read
 
 env:
   APP_ID: in.gxanshu.postcard
   DOMAIN: postcard.gxanshu.in
+  # Pinned digest of the gnome-51 builder image below. Refresh both together
+  # (see docs/supply-chain.md); the provenance record embeds this value.
+  BUILDER_DIGEST: sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
 
 jobs:
   # Release only when the version in meson.build has no matching git tag yet.
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
       new: ${{ steps.v.outputs.new }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - id: v
@@ -46,17 +52,17 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - arch: aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51@sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
       options: --privileged
     env:
       GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
 
@@ -66,7 +72,7 @@ jobs:
       - name: Set up the build environment
         run: |
           # A container has no machine-id (dbus won't start) and no /dev/fuse.
-          cat /proc/sys/kernel/random/uuid | tr -d '-' > /etc/machine-id
+          tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
           echo "${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}" | base64 -d | gpg --import
 
       # Commits are signed here, not at merge time: `ostree pull-local` copies
@@ -82,35 +88,72 @@ jobs:
       - name: Pack the repo
         run: tar -cf "repo-${{ matrix.arch }}.tar" repo
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: repo-${{ matrix.arch }}
           path: repo-${{ matrix.arch }}.tar
           retention-days: 1
 
-  publish:
-    needs: [check, build]
+  # SPDX SBOM of the release source, attached to the GitHub release beside the
+  # .flatpakref. Scans the same commit the build uses; additive only.
+  sbom:
+    needs: [check]
     if: needs.check.outputs.new == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Generate the SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: ./
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          # Pinned syft, not the action's default: bump deliberately (see
+          # docs/supply-chain.md).
+          syft-version: v1.56.0
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: sbom.spdx.json
+          retention-days: 1
+
+  publish:
+    needs: [check, build, sbom]
+    if: needs.check.outputs.new == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51@sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
       options: --privileged
     env:
       VERSION: ${{ needs.check.outputs.version }}
       GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up the build environment
         run: |
-          cat /proc/sys/kernel/random/uuid | tr -d '-' > /etc/machine-id
+          tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
           echo "${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}" | base64 -d | gpg --import
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: repo-*
           path: artifacts
           merge-multiple: true
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom
+          path: sbom
 
       - name: Merge the per-arch repos
         run: |
@@ -133,6 +176,40 @@ jobs:
             ostree --repo=repo refs | grep -qx "app/$APP_ID/$arch/master"
           done
           ostree --repo=repo refs
+
+      # Machine-readable record of what went into this release. Additive: the
+      # GPG signing flow above is untouched.
+      - name: Record build provenance
+        run: |
+          python3 - <<'EOF'
+          import datetime
+          import json
+          import os
+          import subprocess
+
+          revs = {}
+          for arch in ("x86_64", "aarch64"):
+              revs[arch] = subprocess.check_output(
+                  ["ostree", "--repo=repo", "rev-parse",
+                   f"app/{os.environ['APP_ID']}/{arch}/master"],
+                  text=True).strip()
+          builder = subprocess.check_output(
+              ["flatpak-builder", "--version"], text=True).strip()
+          provenance = {
+              "app_id": os.environ["APP_ID"],
+              "version": os.environ["VERSION"],
+              "git_sha": os.environ["GITHUB_SHA"],
+              "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "builder": builder,
+              "builder_image_digest": os.environ["BUILDER_DIGEST"],
+              "runtime": "org.gnome.Platform//51",
+              "ostree_commits": revs,
+          }
+          with open("build-provenance.json", "w") as f:
+              json.dump(provenance, f, indent=2)
+              f.write("\n")
+          print(json.dumps(provenance, indent=2))
+          EOF
 
       - name: Assemble the site
         run: |
@@ -167,7 +244,7 @@ jobs:
           EOF
 
       - name: Publish to the pages branch
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: site
@@ -182,13 +259,17 @@ jobs:
           git push origin "v$VERSION"
 
       # The .flatpakref is the whole Flatpak download: it points at the signed
-      # repo on the pages branch, so there's no bundle to attach.
+      # repo on the pages branch, so there's no bundle to attach. The SBOM and
+      # the provenance record ride along as extra assets (additive only).
       - name: Publish the GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: v${{ env.VERSION }}
           name: Postcard ${{ env.VERSION }}
-          files: postcard.flatpakref
+          files: |
+            postcard.flatpakref
+            sbom/sbom.spdx.json
+            build-provenance.json
           body: |
             Install or update:
 
@@ -199,3 +280,13 @@ jobs:
             Or download `postcard.flatpakref` below and open it with your software centre.
 
             Available for x86_64 and aarch64 — `flatpak` picks the right one.
+
+      # SLSA provenance for the release assets, verifiable with
+      # `gh attestation verify`. Needs the id-token + attestations permissions.
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            postcard.flatpakref
+            sbom/sbom.spdx.json
+            build-provenance.json

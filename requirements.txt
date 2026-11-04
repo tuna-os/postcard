@@ -1,7 +1,23 @@
 # Dev tooling only — not needed to build/run the Flatpak (see pyproject.toml).
+#
+# This file is the ONE version source for Python maintenance tools. Install
+# from it as constraints — `pip install -c requirements.txt <names>` (see
+# `just init` and .github/workflows/tests.yml) — never with `-r`: the
+# PyGObject-stubs pin below must be installed --no-deps, and a `-r` pass would
+# resolve its PyGObject dependency and build it from source. Dependabot bumps
+# these pins weekly; `pip-audit -r requirements.txt` fails CI on any known
+# vulnerability in this set (see docs/supply-chain.md).
+#
 # sqlcipher3 runs the file-backed database tests against real encryption; the
 # Flatpak builds the same version from source (see in.gxanshu.postcard.json).
-ruff
-pytest
-pyright
+ruff==0.17.3
+pytest==9.2.0
+pyright==1.1.414
+pip-audit==2.10.1
+pip-licenses==5.5.5
 sqlcipher3==0.6.4
+# Pinned here with everything else, but it must be installed with --no-deps:
+# it depends on PyGObject, which builds pycairo from source and needs cairo
+# headers, while gi comes from the system (apt python3-gi / --system-site-
+# packages) and the stubs are pure .pyi files regardless.
+PyGObject-stubs==2.18.0

@@ -11,12 +11,16 @@ permissions:
   contents: read
 jobs:
   native:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.24'
+          # Exact patch, not '1.24': setup-go resolves short versions to the
+          # latest patch. The go.mod `go` directive stays the minimum floor.
+          # Bump deliberately; dependabot does not see this (see
+          # docs/supply-chain.md).
+          go-version: '1.24.13'
       - name: Check Go formatting
         run: test -z "$(gofmt -l native/proton)"
       - name: Vet, build and test the helper stub
@@ -27,6 +31,6 @@ jobs:
           go build -o postcard-proton .
       - name: Test the Python and compiled-helper contract without an account
         run: |
-          python3 -m pip install pytest
+          python3 -m pip install -c requirements.txt pytest
           POSTCARD_PROTON_TEST_BINARY="$PWD/native/proton/postcard-proton" \
             python3 -m pytest tests/core/net/test_proton_session.py

@@ -1,0 +1,8 @@
+# The one supported Rust toolchain (issue #18). CI installs exactly this and
+# builds/tests the locked Cargo graph with it; `cargo` picks it up automatically
+# via the rustup shim, so no `+toolchain` flags are needed anywhere.
+# `rust-version` in native/tuta/Cargo.toml stays the minimum floor (1.84).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt"]
+profile = "minimal"

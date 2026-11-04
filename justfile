@@ -48,8 +48,10 @@ init:
         "{{fp-builddir}}" "{{manifest}}"
     # --system-site-packages: PyGObject (gi) comes from apt (python3-gi), not pip.
     python3 -m venv --clear --system-site-packages .venv
-    .venv/bin/pip install -r requirements.txt
-    .venv/bin/pip install --no-deps PyGObject-stubs==2.18.0
+    # requirements.txt is the one version source, used as constraints; the stubs
+    # need --no-deps (see the comment there), so they install separately.
+    .venv/bin/pip install --no-deps -c requirements.txt PyGObject-stubs
+    .venv/bin/pip install -c requirements.txt ruff pytest pyright pip-audit pip-licenses sqlcipher3
 
 # ----------------------------------------------------------------------------
 # Build & run (Flatpak)
@@ -125,7 +127,7 @@ test *ARGS: check
 # Run the GTK suite inside the installed Flatpak under Xvfb — the same shape
 # CI's gui-tests.yml runs. Needs the app installed (build) and xvfb.
 test-gui: build
-    python3 -m pip install -q --target="{{fp-pytest}}" pytest
+    python3 -m pip install -q --target="{{fp-pytest}}" -c requirements.txt pytest
     xvfb-run -a flatpak run --filesystem="$PWD" \
         --env=PYTHONPATH="$PWD/src:$PWD/{{fp-pytest}}" \
         --command=python3 "{{app-id}}" -m pytest "$PWD/tests/gui/" -v
