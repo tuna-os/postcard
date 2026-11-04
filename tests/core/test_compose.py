@@ -338,7 +338,9 @@ def test_rotate_message_id_keeps_everything_but_the_id():
 
     headers = message_from_string(raw.decode(), policy=policy.default)
     assert fresh != msg["Message-ID"]
-    assert headers["Message-ID"] == fresh
+    # Stripped: a long hostname folds the rewritten header onto a continuation
+    # line, which parses back with its leading whitespace attached.
+    assert str(headers["Message-ID"]).strip() == fresh
     assert headers["To"] == "you@example.com"
     assert headers["In-Reply-To"] == "<parent@example.com>"
     assert headers["References"] == "<grandparent@example.com> <parent@example.com>"

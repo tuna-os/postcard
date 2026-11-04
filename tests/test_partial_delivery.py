@@ -462,7 +462,9 @@ def test_a_partial_refusal_rotates_the_message_id(stored, servers):
     assert rotated.message_id != MESSAGE_ID
     assert rotated.message_id.startswith("<") and rotated.message_id.endswith(">")
     headers = email.message_from_bytes(rotated.raw)
-    assert headers["Message-ID"] == rotated.message_id
+    # Stripped: a long hostname folds the rewritten header onto a continuation
+    # line, which parses back with its leading whitespace attached.
+    assert headers["Message-ID"].strip() == rotated.message_id
     assert headers["To"] == YOU
     assert rotated.raw.endswith(b"body")
 
