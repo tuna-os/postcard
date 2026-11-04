@@ -1,6 +1,9 @@
 //! Experimental native Tuta adapter. One JSON request/response on private stdio.
 //! No IMAP, SMTP, listener, keyring, database, or message logging.
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -16,10 +19,19 @@ use tutasdk::{
         file_client::{FileClient, FileClientError},
         rest_client::RestClient,
     },
-    entities::generated::tutanota::{Mail, MailSet, MailSetEntry},
-    login::{CredentialType, Credentials},
+    crypto::sha256,
+    entities::generated::{
+        sys::CloseSessionServicePost,
+        tutanota::{Mail, MailSet, MailSetEntry},
+    },
+    login::{CredentialType, Credentials, LoginError},
     net::native_rest_client::NativeRestClient,
-    GeneratedId, IdTupleGenerated, ListLoadDirection, LoggedInSdk, Sdk,
+    rest_error::HttpError,
+    services::{generated::sys::CloseSessionService, ExtraServiceParams},
+    tutanota_constants::SecondFactorType,
+    util::BASE64_EXT,
+    ApiCallError, CustomId, GeneratedId, IdTupleCustom, IdTupleGenerated, ListLoadDirection,
+    LoggedInSdk, Sdk,
 };
 
 const VERSION: u32 = 1;
@@ -118,6 +130,9 @@ enum Operation {
         ids: Vec<String>,
         destination: String,
     },
+    Revoke {
+        session: Session,
+    },
 }
 #[derive(Deserialize)]
 struct Request {
@@ -193,20 +208,74 @@ fn header(mail: &Mail) -> Result<Value> {
         "is_unread": mail.unread, "confidential": mail.confidential}),
     )
 }
-async fn resume(sdk: &Sdk, session: Session) -> Result<Arc<LoggedInSdk>> {
-    // No automatic reauthentication: a refused client version is not an invalid password.
-    sdk.login(session.credentials())
-        .await
-        .map_err(|_| "resume_failed")
+fn resume_error(error: LoginError) -> &'static str {
+    match error {
+        // The server no longer honors this token: revoked, expired, or logged
+        // out elsewhere. The user signs in again; retrying changes nothing.
+        LoginError::InvalidAccessToken { .. } => "session_revoked",
+        // Our stored material is corrupt, not the server's state.
+        LoginError::InvalidPassphrase { .. } | LoginError::InvalidKey { .. } => "session_invalid",
+        LoginError::ApiCall { source } => match source {
+            ApiCallError::RestClient { .. } => "transport_failed",
+            ApiCallError::ServerResponseError { source } => server_error(source),
+            ApiCallError::InternalSdkError { .. } => "resume_failed",
+        },
+    }
 }
+
+fn server_error(error: HttpError) -> &'static str {
+    match error {
+        // No automatic reauthentication: a refused client version is not an
+        // invalid password. The fix is an app update, not a retry.
+        HttpError::InvalidSoftwareVersionError => "client_outdated",
+        HttpError::SessionExpiredError
+        | HttpError::NotAuthenticatedError
+        | HttpError::NotAuthorizedError
+        | HttpError::AccessExpiredError
+        | HttpError::AccessDeactivatedError
+        | HttpError::AccessBlockedError => "session_revoked",
+        HttpError::RequestTimeoutError => "timeout",
+        HttpError::ConnectionError
+        | HttpError::InternalServerError
+        | HttpError::BadGatewayError
+        | HttpError::ServiceUnavailableError { .. }
+        | HttpError::TooManyRequestsError { .. }
+        | HttpError::LockedError => "transport_failed",
+        _ => "resume_failed",
+    }
+}
+
+async fn resume(sdk: &Sdk, session: Session) -> Result<Arc<LoggedInSdk>> {
+    sdk.login(session.credentials()).await.map_err(resume_error)
+}
+
+// Which code to report when none of the offered challenges is TOTP: name
+// the blocking factor honestly so the UI can say what the account actually
+// needs. A mix, or a type this helper predates, stays generic.
+fn unsupported_factor_code(challenge_types: &[i64]) -> &'static str {
+    let mut kinds = challenge_types.to_vec();
+    kinds.sort_unstable();
+    kinds.dedup();
+    match kinds.as_slice() {
+        [only] if *only == SecondFactorType::U2f as i64 => "unsupported_u2f",
+        [only] if *only == SecondFactorType::Webauthn as i64 => "unsupported_webauthn",
+        _ => "unsupported_second_factor",
+    }
+}
+
 async fn login(sdk: &Sdk, email: String, password: String, totp: Option<String>) -> Result<Value> {
     let initiated = sdk
         .initiate_session(&email, &password, "Postcard (experimental)")
         .await
         .map_err(|_| "login_failed")?;
     if !initiated.challenges.is_empty() {
-        if !initiated.challenges.iter().any(|c| c.r#type == 1) {
-            return Err("unsupported_second_factor");
+        let offers_totp = initiated
+            .challenges
+            .iter()
+            .any(|c| c.r#type == SecondFactorType::Totp as i64);
+        if !offers_totp {
+            let types: Vec<i64> = initiated.challenges.iter().map(|c| c.r#type).collect();
+            return Err(unsupported_factor_code(&types));
         }
         let code = totp.ok_or("second_factor_required")?;
         if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
@@ -233,6 +302,57 @@ async fn login(sdk: &Sdk, email: String, password: String, totp: Option<String>)
         .await
         .map_err(|_| "login_failed")?;
     Ok(json!({"session": Session::from_credentials(initiated.credentials)}))
+}
+
+// First bytes of an access token: the session list id. Mirrors the SDK's own
+// session id parsing, which lives behind a private function.
+const GENERATED_ID_BYTES: usize = 9;
+
+fn session_id_from_token(token: &str) -> Option<IdTupleCustom> {
+    let bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
+    if bytes.len() < GENERATED_ID_BYTES {
+        return None;
+    }
+    let (list_id_bytes, element_id_bytes) = bytes.split_at(GENERATED_ID_BYTES);
+    Some(IdTupleCustom {
+        list_id: GeneratedId(BASE64_EXT.encode(list_id_bytes)),
+        element_id: CustomId(URL_SAFE_NO_PAD.encode(sha256(element_id_bytes))),
+    })
+}
+
+async fn revoke(sdk: &Sdk, session: Session) -> Result<Value> {
+    let token = session.access_token.clone();
+    let session_id = session_id_from_token(&token).ok_or("session_invalid")?;
+    let logged_in = match sdk.login(session.credentials()).await {
+        Ok(logged_in) => logged_in,
+        // Idempotent: a dead session needs no closing.
+        Err(
+            LoginError::InvalidAccessToken { .. }
+            | LoginError::InvalidPassphrase { .. }
+            | LoginError::InvalidKey { .. },
+        ) => return Ok(json!({})),
+        Err(error) => return Err(resume_error(error)),
+    };
+    let closed = CloseSessionServicePost {
+        _format: 0,
+        accessToken: token,
+        sessionId: session_id,
+    };
+    match logged_in
+        .get_service_executor()
+        .post::<CloseSessionService>(closed, ExtraServiceParams::default())
+        .await
+    {
+        Ok(()) => Ok(json!({})),
+        // Raced with an expiry or a second client: gone is gone.
+        Err(ApiCallError::ServerResponseError {
+            source:
+                HttpError::NotFoundError
+                | HttpError::NotAuthenticatedError
+                | HttpError::SessionExpiredError,
+        }) => Ok(json!({})),
+        Err(_) => Err("revoke_failed"),
+    }
 }
 
 async fn sync(
@@ -377,6 +497,7 @@ async fn dispatch(request: Request) -> Result<Value> {
                 .map_err(|_| "request_failed")?;
             Ok(json!({}))
         }
+        Operation::Revoke { session } => revoke(&sdk, session).await,
     }
 }
 #[tokio::main]
@@ -410,6 +531,105 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tutasdk::bindings::rest_client::RestClientError;
+
+    fn resume_of(error: LoginError) -> &'static str {
+        resume_error(error)
+    }
+
+    fn server(code: HttpError) -> LoginError {
+        LoginError::ApiCall {
+            source: ApiCallError::ServerResponseError { source: code },
+        }
+    }
+
+    #[test]
+    fn resume_distinguishes_revoked_outage_and_refused_version() {
+        let token = || LoginError::InvalidAccessToken {
+            error_message: String::new(),
+        };
+        assert_eq!(resume_of(token()), "session_revoked");
+        assert_eq!(
+            resume_of(server(HttpError::SessionExpiredError)),
+            "session_revoked"
+        );
+        assert_eq!(
+            resume_of(server(HttpError::NotAuthenticatedError)),
+            "session_revoked"
+        );
+        assert_eq!(
+            resume_of(server(HttpError::InvalidSoftwareVersionError)),
+            "client_outdated"
+        );
+        assert_eq!(
+            resume_of(LoginError::ApiCall {
+                source: ApiCallError::RestClient {
+                    source: RestClientError::NetworkError,
+                },
+            }),
+            "transport_failed"
+        );
+        assert_eq!(
+            resume_of(server(HttpError::ServiceUnavailableError {
+                suspension_time_sec: None,
+            })),
+            "transport_failed"
+        );
+        assert_eq!(resume_of(server(HttpError::RequestTimeoutError)), "timeout");
+        assert_eq!(
+            resume_of(server(HttpError::BadRequestError)),
+            "resume_failed"
+        );
+    }
+
+    #[test]
+    fn corrupt_local_material_is_not_a_revoked_session() {
+        assert_eq!(
+            resume_of(LoginError::InvalidPassphrase {
+                error_message: String::new(),
+            }),
+            "session_invalid"
+        );
+        assert_eq!(
+            resume_of(LoginError::InvalidKey {
+                error_message: String::new(),
+            }),
+            "session_invalid"
+        );
+    }
+
+    #[test]
+    fn blocking_second_factor_is_named_honestly() {
+        assert_eq!(unsupported_factor_code(&[0]), "unsupported_u2f");
+        assert_eq!(unsupported_factor_code(&[0, 0]), "unsupported_u2f");
+        assert_eq!(unsupported_factor_code(&[2]), "unsupported_webauthn");
+        assert_eq!(
+            unsupported_factor_code(&[0, 2]),
+            "unsupported_second_factor"
+        );
+        assert_eq!(unsupported_factor_code(&[7]), "unsupported_second_factor");
+        assert_eq!(unsupported_factor_code(&[]), "unsupported_second_factor");
+    }
+
+    #[test]
+    fn session_id_comes_from_the_token_prefix() {
+        assert_eq!(session_id_from_token("!!!not-base64!!!"), None);
+        assert_eq!(session_id_from_token("dG9v"), None);
+        let raw: Vec<u8> = (0..16).collect();
+        let token = URL_SAFE_NO_PAD.encode(&raw);
+        let parsed = session_id_from_token(&token).unwrap();
+        assert_eq!(
+            BASE64_EXT.decode(parsed.list_id.to_string()).unwrap(),
+            raw[..9]
+        );
+        assert_eq!(
+            URL_SAFE_NO_PAD
+                .decode(parsed.element_id.to_string())
+                .unwrap(),
+            sha256(&raw[9..])
+        );
+    }
+
     #[test]
     fn ids_preserve_both_components() {
         assert_eq!(id(&tuple("list_1/mail-2").unwrap()), "list_1/mail-2");

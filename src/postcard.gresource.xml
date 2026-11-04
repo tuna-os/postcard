@@ -9,6 +9,7 @@
     <file preprocess="xml-stripblanks">ui/online-accounts-dialog.ui</file>
     <file preprocess="xml-stripblanks">ui/microsoft-dialog.ui</file>
     <file preprocess="xml-stripblanks">ui/fastmail-dialog.ui</file>
+    <file preprocess="xml-stripblanks">ui/tuta-dialog.ui</file>
     <file preprocess="xml-stripblanks">ui/composer-window.ui</file>
     <file preprocess="xml-stripblanks">ui/preferences-dialog.ui</file>
     <file>style.css</file>

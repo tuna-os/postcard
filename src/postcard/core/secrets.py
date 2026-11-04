@@ -1,6 +1,7 @@
 """Where an account's sign-in comes from: the system keyring for an account
 typed in by hand, GNOME Online Accounts for one imported from Settings."""
 
+import json
 import logging
 import secrets as stdlib_secrets
 
@@ -15,7 +16,7 @@ from .models.account import Account
 from .net import ms_oauth
 from .net.auth import Credential
 from .net.proton_session import MECHANISM_PROTON
-from .net.tuta_session import MECHANISM_TUTA
+from .net.tuta_session import MECHANISM_TUTA, TutaError
 from .store.database import CacheError
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,25 @@ def lookup_password(account_id: int) -> str | None:
 
 def clear_password(account_id: int) -> bool:
     return Secret.password_clear_sync(_SCHEMA, {"account-id": str(account_id)}, None)
+
+
+def store_tuta_session(account_id: int, credential: Credential) -> None:
+    """Store a resumable Tuta session in the keyring.
+
+    The credential must be a session the helper returned, never the account
+    password: refusing anything else here is what keeps passwords out of
+    long-term storage even if a caller mixes them up. The account database
+    holds no credentials at all.
+    """
+    if credential.mechanism != MECHANISM_TUTA:
+        raise TutaError("invalid_request")
+    try:
+        session = json.loads(credential.secret)
+    except ValueError:
+        raise TutaError("invalid_request") from None
+    if not isinstance(session, dict) or not isinstance(session.get("login"), str):
+        raise TutaError("invalid_request")
+    store_password(account_id, credential.secret)
 
 
 def database_key() -> bytes:

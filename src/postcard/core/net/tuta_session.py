@@ -15,6 +15,9 @@ MECHANISM_TUTA = "tuta-session"
 HELPER_NAME = "postcard-tuta"
 PROTOCOL_VERSION = 1
 HELPER_TIMEOUT_SECONDS = 100
+# A TOTP code is six ASCII digits; anything else is rejected without waking
+# the helper, which applies the same check before spending a login attempt.
+TOTP_LENGTH = 6
 # A helper reply is JSON whose bulk is base64 bodies and attachments -- ASCII,
 # so one character is one byte where the size actually matters. Checked before
 # json.loads, so an unbounded reply never pays for the parse and the copies
@@ -92,9 +95,15 @@ ERROR_CODES = frozenset(
         "invalid_move_batch",
         "login_failed",
         "resume_failed",
+        "session_revoked",
+        "session_invalid",
+        "client_outdated",
+        "revoke_failed",
         "second_factor_required",
         "invalid_totp",
         "unsupported_second_factor",
+        "unsupported_u2f",
+        "unsupported_webauthn",
         "second_factor_failed",
         "request_failed",
         "folder_not_found",
@@ -109,6 +118,15 @@ ERROR_CODES = frozenset(
 )
 
 
+def is_valid_totp(code: str) -> bool:
+    """Whether a code is worth a helper round trip: six ASCII digits.
+
+    `str.isdigit` alone is not enough -- it accepts non-ASCII numerals the
+    helper would reject after spending a login attempt.
+    """
+    return len(code) == TOTP_LENGTH and code.isascii() and code.isdigit()
+
+
 def login(
     email: str,
     password: str,
@@ -118,8 +136,12 @@ def login(
 ) -> Credential:
     """Return a resumable session for libsecret; do not persist the password.
 
-    Experimental developer API. GTK challenge/cancellation and session
-    revocation are tracked separately before enabling account onboarding.
+    The helper runs the KDF and unlocks the keys, which can take a while --
+    call from a worker thread. When the account has TOTP enabled and no code
+    was given, this raises `second_factor_required` and the caller retries
+    with the code; an `invalid_totp` may just have expired, so that retry is
+    the caller's to offer. U2F/WebAuthn-only accounts report which factor
+    blocks them instead of a generic refusal.
     """
     result = _request(transport, "login", email=email, password=password, totp=totp)
     session = result.get("session")
@@ -132,6 +154,15 @@ def login(
 
 
 class TutaSession:
+    """One helper operation on a resumed stored session.
+
+    Every operation re-resumes, so after a restart a revoked session
+    (`session_revoked`) reads differently from an outage (`transport_failed`)
+    and a refused client version (`client_outdated`) with no dedicated
+    check. Closing the session server-side is `request("revoke")`, which
+    treats an already-gone session as closed.
+    """
+
     def __init__(
         self, credential: Credential, transport: Transport = helper_transport
     ) -> None:
