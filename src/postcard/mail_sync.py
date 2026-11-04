@@ -14,7 +14,7 @@ from functools import lru_cache
 from gettext import gettext as _
 from urllib.parse import quote
 
-from .core.compose import extract_recipients
+from .core.compose import extract_recipients, rotate_message_id
 from .core.lifecycle import Lifecycle
 from .core.mime.message_parser import clock_format
 from .core.models.account import (
@@ -1366,7 +1366,14 @@ def fail_refused_send(
     state = (
         OutboxState.FAILED if send.attempts >= MAX_SEND_ATTEMPTS else OutboxState.RETRY
     )
-    db.fail_refused_outbox_email(email_id, list(refused), error, state)
+    rotated = None
+    if send.message_id:
+        # A refused-only retry is a new send under a fresh id: the attempt's
+        # id may already sit in Sent, auto-filed by the server that took it
+        # for the accepted recipients, and matching it would drop the refused
+        # without sending. Mail with no id keeps none.
+        rotated = rotate_message_id(send.raw)
+    db.fail_refused_outbox_email(email_id, list(refused), error, state, rotated)
     return state
 
 

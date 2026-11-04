@@ -7,6 +7,7 @@ retry sends to them only. A mid-send disconnect leaves every recipient's
 state unknown, so that retry sends to all of them again.
 """
 
+import email
 import smtplib
 
 import pytest
@@ -59,6 +60,7 @@ class FakeImapSession:
     mailboxes: list[MailboxInfo] = []
     appends: list[tuple[str, bytes]] = []
     sent_uids: set[str] = set()
+    sent_by_id: dict[str, set[str]] | None = None
     validity: int | None = None
 
     def __init__(self, host, port, security):
@@ -86,6 +88,9 @@ class FakeImapSession:
         return type(self).validity
 
     def search_message_id(self, message_id):
+        by_id = type(self).sent_by_id
+        if by_id is not None:
+            return set(by_id.get(message_id, set()))
         return set(type(self).sent_uids)
 
     def has_capability(self, name):
@@ -115,6 +120,7 @@ def servers(monkeypatch):
     ]
     FakeImapSession.appends = []
     FakeImapSession.sent_uids = set()
+    FakeImapSession.sent_by_id = None
     FakeImapSession.validity = None
     monkeypatch.setattr(mail_sync, "SmtpSession", FakeSmtpSession)
     monkeypatch.setattr(mail_sync, "ImapSession", FakeImapSession)
@@ -144,6 +150,10 @@ def _queued(database, account_id, envelope=None, raw=None):
     job = mail_sync.claim_queued_send(database, mail.id)
     assert job is not None
     return outbox, mail, job
+
+
+def _raw_without_id():
+    return f"To: {YOU}\r\n\r\nbody".encode()
 
 
 def _account(**overrides):
@@ -435,3 +445,66 @@ def test_a_bcc_refusal_retries_without_naming_bcc_in_mime(stored, servers):
 
     assert [sent[1] for sent in FakeSmtpSession.sends] == [[YOU, hidden], [hidden]]
     assert hidden.encode() not in retry.raw
+
+
+def test_a_partial_refusal_rotates_the_message_id(stored, servers):
+    database, account = stored
+    _outbox, mail, job = _queued(database, account.id, envelope=[YOU, GONE])
+    FakeSmtpSession.refused = {GONE: (550, b"mailbox unavailable")}
+
+    with pytest.raises(SmtpRefusedError) as caught:
+        mail_sync.send_queued(_account(), CREDENTIAL, job)
+    mail_sync.fail_refused_send(
+        database, mail.id, caught.value.refused, str(caught.value)
+    )
+
+    rotated = database.queued_send(mail.id)
+    assert rotated.message_id != MESSAGE_ID
+    assert rotated.message_id.startswith("<") and rotated.message_id.endswith(">")
+    headers = email.message_from_bytes(rotated.raw)
+    assert headers["Message-ID"] == rotated.message_id
+    assert headers["To"] == YOU
+    assert rotated.raw.endswith(b"body")
+
+
+def test_a_retry_ignores_a_sent_copy_filed_under_the_old_id(stored, servers):
+    # A server that auto-files SMTP mail to Sent kept the first attempt under
+    # its id; the refused-only retry goes out under a fresh one, so the
+    # pre-flight finds nothing and the refused recipient is not dropped.
+    database, account = stored
+    _smtp, imap, *_rest = servers
+    _outbox, mail, job = _queued(database, account.id, envelope=[YOU, GONE])
+    FakeSmtpSession.refused = {GONE: (550, b"mailbox unavailable")}
+
+    with pytest.raises(SmtpRefusedError) as caught:
+        mail_sync.send_queued(_account(), CREDENTIAL, job)
+    mail_sync.fail_refused_send(
+        database, mail.id, caught.value.refused, str(caught.value)
+    )
+    # The server took the first attempt for YOU and filed it under its id.
+    imap.sent_by_id = {MESSAGE_ID: {"7"}}
+
+    FakeSmtpSession.refused = {}
+    retry = _retry(database, mail.id)
+    assert retry.message_id != MESSAGE_ID
+    mail_sync.send_queued(_account(), CREDENTIAL, retry)
+
+    assert [sent[1] for sent in FakeSmtpSession.sends] == [[YOU, GONE], [GONE]]
+
+
+def test_mail_without_an_id_keeps_none_after_a_refusal(stored, servers):
+    database, account = stored
+    _outbox, mail, _job = _queued(
+        database, account.id, envelope=[YOU, GONE], raw=_raw_without_id()
+    )
+    FakeSmtpSession.refused = {GONE: (550, b"mailbox unavailable")}
+    claimed = database.queued_send(mail.id)
+    assert claimed.message_id == ""
+
+    with pytest.raises(SmtpRefusedError) as caught:
+        mail_sync.send_queued(_account(), CREDENTIAL, claimed)
+    mail_sync.fail_refused_send(
+        database, mail.id, caught.value.refused, str(caught.value)
+    )
+
+    assert database.queued_send(mail.id).message_id == ""

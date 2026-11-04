@@ -1404,30 +1404,47 @@ class Database:
         self._conn.commit()
 
     def fail_refused_outbox_email(
-        self, email_id: int, refused: list[str], error: str, state: OutboxState
+        self,
+        email_id: int,
+        refused: list[str],
+        error: str,
+        state: OutboxState,
+        rotated: tuple[bytes, str] | None = None,
     ) -> None:
         """Record a refused-recipient attempt, narrowing the envelope to them.
 
         The retry sends to the refused recipients only, never again to the
         ones that already got it. No new column: the narrowed envelope is the
         refused set, readable from queued_send like any other envelope.
+        rotated carries the retry's rewritten raw message plus its fresh
+        Message-ID, stored in the same commit: a retry under the attempt's
+        old id would match a server-auto-filed Sent copy and drop the
+        refused recipients without sending.
         """
-        self._conn.execute(
-            """
-            UPDATE outbox_queue
-            SET envelope = ?, state = ?, last_error = ?, updated_at = ?
-            WHERE email_id = ? AND state = ?
-            """,
-            (
-                json.dumps(refused),
-                state,
-                error,
-                _now_iso(),
-                email_id,
-                OutboxState.SENDING,
-            ),
-        )
-        self._conn.commit()
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE outbox_queue
+                SET envelope = ?, state = ?, last_error = ?, updated_at = ?
+                WHERE email_id = ? AND state = ?
+                """,
+                (
+                    json.dumps(refused),
+                    state,
+                    error,
+                    _now_iso(),
+                    email_id,
+                    OutboxState.SENDING,
+                ),
+            )
+            if rotated is not None:
+                raw, message_id = rotated
+                self._conn.execute(
+                    """
+                    UPDATE emails SET raw_message = ?, message_id = ? WHERE id = ?
+                    """,
+                    (raw, message_id, email_id),
+                )
 
     def recover_interrupted_sends(self, except_ids: set[int] | None = None) -> int:
         """Ready every send left sending by a crash, so the drain retries it.

@@ -11,6 +11,7 @@ from postcard.core.compose import (
     replace_last_address,
     reply_all_cc,
     reply_subject,
+    rotate_message_id,
     signature_block,
     suggest_addresses,
     to_html,
@@ -320,3 +321,25 @@ def test_parse_mailto_merges_path_and_query_recipients():
     draft = parse_mailto("mailto:bob@x.com?to=carl@x.com&SUBJECT=Hi")
     assert draft.to == "bob@x.com, carl@x.com"
     assert draft.subject == "Hi"
+
+
+def test_rotate_message_id_keeps_everything_but_the_id():
+    msg = build_mime_message(
+        "ada@example.com",
+        ["you@example.com"],
+        [],
+        "Hi",
+        "<div>Hi</div>",
+        [],
+        in_reply_to="<parent@example.com>",
+        references="<grandparent@example.com> <parent@example.com>",
+    )
+    raw, fresh = rotate_message_id(msg.as_bytes())
+
+    headers = message_from_string(raw.decode(), policy=policy.default)
+    assert fresh != msg["Message-ID"]
+    assert headers["Message-ID"] == fresh
+    assert headers["To"] == "you@example.com"
+    assert headers["In-Reply-To"] == "<parent@example.com>"
+    assert headers["References"] == "<grandparent@example.com> <parent@example.com>"
+    assert "Hi" in headers.get_body().get_content()
