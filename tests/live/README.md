@@ -37,6 +37,9 @@ pytest -m live tests/live/test_tuta_live.py   # one provider
 | `POSTCARD_PROTON_EMAIL` | Proton | test account username or address |
 | `POSTCARD_PROTON_PASSWORD` | Proton | test account password |
 | `POSTCARD_PROTON_TOTP` | Proton | current second-factor code, when the account uses one |
+| `POSTCARD_FASTMAIL_CLIENT_ID` | Fastmail | OAuth client id |
+| `POSTCARD_FASTMAIL_REFRESH_TOKEN` | Fastmail | stored refresh token (see below) |
+| `POSTCARD_FASTMAIL_EMAIL` | Fastmail | account address; defaults to `live@example.com` |
 
 Dormant accounts may trip provider abuse detection on first contact from a
 new network — Proton answers 422 "unusual activity" and Tuta may refuse
@@ -55,9 +58,25 @@ refresh token with `ms_oauth.encode_stored` and export that JSON as
 registered client id, that dialog is the mint; until then any standards-
 compliant OAuth client with those scopes produces an equivalent token.
 
+## Bootstrapping the Fastmail token
+
+The Fastmail test covers the refresh path, not the first interactive login,
+so it needs a refresh token minted once up front: register the OAuth client,
+complete one interactive sign-in with the same client id and scopes the app
+requests (`urn:ietf:params:jmap:core`, `urn:ietf:params:jmap:mail`,
+`urn:ietf:params:jmap:submission`), then store the refresh token with
+`fastmail_oauth.encode_stored` and export that JSON as
+`POSTCARD_FASTMAIL_REFRESH_TOKEN`. When the app's Fastmail dialog lands behind
+a registered client id, that dialog is the mint; until then any standards-
+compliant OAuth client with those scopes produces an equivalent token. The
+exported token is single-use: each run consumes it (Fastmail rotates the
+refresh token on every refresh), so mint a fresh one before each run — a
+repeat run with the old value fails, and reuse risks revoking the grant.
+
 ## Provider status
 
 - Tuta: login plus a one-page sync through the compiled helper.
 - Microsoft: refresh plus a one-page folder read through Graph.
 - Proton: SRP login through the compiled helper, asserting the resumable
   session carries tokens but never the password.
+- Fastmail: refresh plus a one-page mailbox read through JMAP.

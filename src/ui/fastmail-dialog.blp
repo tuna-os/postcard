@@ -1,0 +1,80 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $PostcardFastmailDialog: Adw.Dialog {
+    title: _("Fastmail");
+    content-width: 480;
+    content-height: 480;
+
+    child: Adw.ToastOverlay toast_overlay {
+        child: Adw.ToolbarView {
+            [top]
+            Adw.HeaderBar {}
+
+            content: Gtk.Stack dialog_stack {
+                Gtk.StackPage {
+                    name: "form";
+                    child: Adw.PreferencesPage {
+                        Adw.PreferencesGroup {
+                            title: _("Account");
+                            description: _("Sign in with Fastmail to add the account. The browser opens outside Postcard.");
+
+                            Adw.EntryRow email_row {
+                                title: _("Email");
+                              }
+
+                            Adw.EntryRow display_name_row {
+                                title: _("Display Name");
+                              }
+                          }
+
+                        Adw.PreferencesGroup {
+                            Gtk.Box {
+                                orientation: horizontal;
+                                spacing: 12;
+                                halign: center;
+
+                                Gtk.Button cancel_button {
+                                    label: _("Cancel");
+
+                                    styles ["pill"]
+                                  }
+
+                                Gtk.Button sign_in_button {
+                                    label: _("Sign In");
+                                    sensitive: false;
+
+                                    styles ["suggested-action", "pill"]
+                                  }
+                              }
+                          }
+                      };
+                  }
+
+                Gtk.StackPage {
+                    name: "waiting";
+                    child: Adw.StatusPage {
+                        title: _("Waiting for the Browser");
+                        description: _("Complete the Fastmail sign-in in your browser, then return here.");
+                        child: Gtk.Box {
+                            orientation: vertical;
+                            spacing: 12;
+                            halign: center;
+
+                            Gtk.Spinner waiting_spinner {
+                                spinning: true;
+                                halign: center;
+                              }
+
+                            Gtk.Button waiting_cancel_button {
+                                label: _("Cancel");
+
+                                styles ["pill"]
+                              }
+                          };
+                      };
+                  }
+              };
+          };
+      };
+  }

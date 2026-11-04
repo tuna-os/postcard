@@ -5,6 +5,7 @@ import ssl
 from gettext import gettext as _
 
 from ..store.database import CacheError
+from .fastmail_oauth import FastmailOAuthError
 from .graph_session import GraphError
 from .imap_session import ImapError, UidValidityError
 from .ms_oauth import MsOAuthError
@@ -53,6 +54,8 @@ def classify(  # noqa: PLR0911, PLR0912, C901
         return _classify_proton(exc)
     if isinstance(exc, MsOAuthError):
         return _classify_ms_oauth(exc)
+    if isinstance(exc, FastmailOAuthError):
+        return _classify_fastmail_oauth(exc)
     if isinstance(exc, CacheError):
         return _classify_cache(exc)
     if isinstance(exc, GraphError):
@@ -128,6 +131,14 @@ def _classify_ms_oauth(exc: MsOAuthError) -> tuple[bool, str]:
             "The Microsoft sign-in expired. Reconnect the account to continue."
         )
     return False, _("The Microsoft sign-in could not be completed. Try again later.")
+
+
+def _classify_fastmail_oauth(exc: FastmailOAuthError) -> tuple[bool, str]:
+    if exc.code == "invalid_grant":
+        return True, _(
+            "The Fastmail sign-in expired. Reconnect the account to continue."
+        )
+    return False, _("The Fastmail sign-in could not be completed. Try again later.")
 
 
 def _classify_proton(exc: ProtonError) -> tuple[bool, str]:
