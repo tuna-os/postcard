@@ -1345,16 +1345,29 @@ class Database:
 
     def claim_outbox_email(self, email_id: int) -> QueuedSend | None:
         """Take a queued mail into sending, counting the attempt. None when
-        another send already holds it, or it reached terminal failed."""
-        cursor = self._conn.execute(
-            """
-            UPDATE outbox_queue
-            SET state = ?, attempts = attempts + 1, updated_at = ?
-            WHERE email_id = ? AND state IN ('ready', 'retry')
-            """,
-            (OutboxState.SENDING, _now_iso(), email_id),
-        )
-        self._conn.commit()
+        another send already holds it, or it reached terminal failed.
+
+        The claim is the crash marker for the submit about to start, so it
+        commits under synchronous FULL: once the caller spawns the submit
+        worker, a crash -- process or power -- must find sending here, never
+        a retryable state the recovery could mistake for unsent.
+        """
+        # FULL before the UPDATE: the safety level cannot change inside the
+        # transaction the UPDATE opens, and the following commit is the one
+        # that must reach stable storage.
+        self._conn.execute("PRAGMA synchronous = FULL")
+        try:
+            cursor = self._conn.execute(
+                """
+                UPDATE outbox_queue
+                SET state = ?, attempts = attempts + 1, updated_at = ?
+                WHERE email_id = ? AND state IN ('ready', 'retry')
+                """,
+                (OutboxState.SENDING, _now_iso(), email_id),
+            )
+            self._conn.commit()
+        finally:
+            self._conn.execute("PRAGMA synchronous = NORMAL")
         if cursor.rowcount == 0:
             return None
         return self.queued_send(email_id)
@@ -1446,29 +1459,63 @@ class Database:
                     (raw, message_id, email_id),
                 )
 
-    def recover_interrupted_sends(self, except_ids: set[int] | None = None) -> int:
-        """Ready every send left sending by a crash, so the drain retries it.
+    def recover_interrupted_sends(
+        self,
+        except_ids: set[int] | None = None,
+        *,
+        ambiguous_protocols: frozenset[str] = frozenset(),
+        ambiguous_error: str = "",
+    ) -> int:
+        """Settle every send left sending by a crash. Returns how many rows
+        settled either way.
 
-        A crash between SMTP acceptance and completion leaves exactly this: a
-        sending row whose mail may or may not have left. The retry proves which
-        by looking for its own copy in Sent before touching SMTP. except_ids
-        are claims a live send in this process still holds -- recovering one
-        would let a second worker send it too.
+        A crash between server acceptance and completion leaves exactly this:
+        a sending row whose mail may or may not have left. Most protocols
+        prove which by looking for their own copy in Sent before resending,
+        so their rows ready again -- but a protocol in ambiguous_protocols
+        has no lookup that can prove it (Tuta's server assigns its own
+        Message-ID), and retrying one could deliver it twice. Those rows fail
+        closed to terminal failed with ambiguous_error, for a human to check
+        Sent -- the crash-time twin of the live send_uncertain path.
+        except_ids are claims a live send in this process still holds --
+        recovering one would let a second worker send it too.
         """
-        if except_ids:
-            placeholders = ", ".join("?" for _ in except_ids)
+        held = sorted(except_ids or ())
+        held_clause = ""
+        if held:
+            placeholders = ", ".join("?" for _ in held)
+            held_clause = f" AND email_id NOT IN ({placeholders})"
+        ambiguous = sorted(ambiguous_protocols)
+        matches = (
+            "SELECT e.id FROM emails e"
+            " JOIN folders f ON f.id = e.folder_id"
+            " JOIN accounts a ON a.id = f.account_id"
+            f" WHERE a.protocol IN ({', '.join('?' for _ in ambiguous)})"
+        )
+        settled = 0
+        if ambiguous:
             cursor = self._conn.execute(
-                "UPDATE outbox_queue SET state = ? WHERE state = ?"
-                f" AND email_id NOT IN ({placeholders})",
-                (OutboxState.READY, OutboxState.SENDING, *except_ids),
+                "UPDATE outbox_queue SET state = ?, last_error = ?, updated_at = ?"
+                " WHERE state = ?" + held_clause + f" AND email_id IN ({matches})",
+                (
+                    OutboxState.FAILED,
+                    ambiguous_error,
+                    _now_iso(),
+                    OutboxState.SENDING,
+                    *held,
+                    *ambiguous,
+                ),
             )
-        else:
-            cursor = self._conn.execute(
-                "UPDATE outbox_queue SET state = ? WHERE state = ?",
-                (OutboxState.READY, OutboxState.SENDING),
-            )
+            settled += cursor.rowcount
+        cursor = self._conn.execute(
+            "UPDATE outbox_queue SET state = ? WHERE state = ?"
+            + held_clause
+            + ("" if not ambiguous else f" AND email_id NOT IN ({matches})"),
+            (OutboxState.READY, OutboxState.SENDING, *held, *ambiguous),
+        )
+        settled += cursor.rowcount
         self._conn.commit()
-        return cursor.rowcount
+        return settled
 
     def pending_outbox_sends(self, outbox_folder_id: int) -> list[QueuedSend]:
         """Every Outbox mail with something to send, oldest first.

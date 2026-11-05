@@ -752,9 +752,12 @@ class _TutaDriver(ProviderDriver):
         atomically, so there is no partial refusal to narrow -- a failure is
         either definitive (nothing sent, safe to retry) or `send_uncertain`
         (possibly sent: the caller must terminal-fail it for a human, never
-        auto-retry it). Like Graph, the server files Sent itself, so there is
-        nothing to append -- but unlike Graph the server assigns its own
-        Message-ID, which is why sent_copy below cannot match by ours.
+        auto-retry it). A crash after the server accepts is the same
+        ambiguity without a witness: the claim committed before the submit,
+        so recovery finds sending and fails it closed rather than retrying.
+        Like Graph, the server files Sent itself, so there is nothing to
+        append -- but unlike Graph the server assigns its own Message-ID,
+        which is why sent_copy below cannot match by ours.
         """
         sent = tuta_messages.send_mime(
             TutaSession(credential),
@@ -785,7 +788,9 @@ class _TutaDriver(ProviderDriver):
         # sync merges the Sent copy onto the filed row by its compound server
         # id. The gap is the ambiguous retry, which can resend after a lost
         # reply -- that is why `send_uncertain` must terminal-fail instead of
-        # retrying, and why SENT_COPY_LOOKUP stays off this driver.
+        # retrying, and why SENT_COPY_LOOKUP stays off this driver. A crash
+        # is the same ambiguity without a witness: recover_queued_sends
+        # fails those rows closed too.
         return None
 
 
@@ -1706,9 +1711,11 @@ def _append_to_sent(
 # --- queued sends ----------------------------------------------------------
 # The Outbox as a state machine, worked from the main thread: claim a row
 # before its worker starts, complete or fail it when the worker reports back.
-# A crash between SMTP acceptance and completion leaves a sending row whose
+# A crash between server acceptance and completion leaves a sending row whose
 # mail may or may not have left, so every attempt looks for its own copy in
-# Sent before touching SMTP -- the only proof either way.
+# Sent before touching the server again -- the only proof either way. Tuta
+# has no such proof (the server assigns its own Message-ID), so recovery
+# fails its interrupted rows closed instead of retrying them.
 
 # How many attempts a queued mail gets before it rests as terminal failed,
 # staying visible in the Outbox until the user deletes it.
@@ -1731,13 +1738,31 @@ def claim_queued_send(db: Database, email_id: int) -> QueuedSend | None:
 
 def release_queued_send(email_id: int) -> None:
     """Let go of a claim without completing it, for a send whose result was
-    dropped. Its row stays to be recovered and retried by the next drain."""
+    dropped. Its row stays sending, for the next drain's recovery to settle."""
     _live_claims.discard(email_id)
 
 
 def recover_queued_sends(db: Database) -> int:
-    """Ready every send a crash interrupted, except claims a live send holds."""
-    return db.recover_interrupted_sends(set(_live_claims))
+    """Settle every send a crash interrupted, except claims a live send holds.
+
+    Most rows ready again for a guarded retry -- but a Tuta row can never
+    prove whether its mail went out (the server assigns its own Message-ID,
+    so no Sent lookup can match it), and retrying it could deliver it twice.
+    Those fail closed to terminal failed with the send_uncertain wording:
+    the same state and message the live path records when the helper reports
+    the submit ambiguous. The claim committed durably before the submit
+    worker started, so a crash at any point after it -- process or power --
+    lands here. A future SEND-capable driver without SENT_COPY_LOOKUP joins
+    this set, or its crash retries resend too.
+    """
+    settled = db.recover_interrupted_sends(
+        set(_live_claims),
+        ambiguous_protocols=frozenset({PROTOCOL_TUTA}),
+        ambiguous_error=str(TutaError("send_uncertain")),
+    )
+    if settled:
+        logger.warning("recovered %d interrupted send(s) from the Outbox", settled)
+    return settled
 
 
 def fail_queued_send(db: Database, email_id: int, error: str) -> OutboxState:
