@@ -76,10 +76,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Install Flatpak tooling and Xvfb
+      - name: Install Flatpak tooling, Xvfb and a session bus
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak xvfb
+          sudo apt-get install -y flatpak xvfb dbus
 
       - name: Restore the Flatpak runtime cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -110,14 +110,15 @@ jobs:
             'command -v postcard-tuta && command -v postcard-proton && ls -l /app/bin/postcard-tuta /app/bin/postcard-proton'
 
       # Full launch with nowhere to read or write outside .smoke/: proves the
-      # installed Python, gresource and desktop entry boot together. No secret
-      # service runs here, so the app must reach its locked-keyring state and
+      # installed Python, gresource and desktop entry boot together. A desktop
+      # always has a session bus, so the launch gets a private one; no secret
+      # service runs on it, so the app must reach its locked-keyring state and
       # stay there -- exiting early or logging a traceback fails.
       - name: Launch the installed app with isolated state
         run: |
           mkdir -p .smoke/data .smoke/config .smoke/cache
           set +e
-          timeout 60 xvfb-run -a flatpak run \
+          timeout 60 dbus-run-session -- xvfb-run -a flatpak run \
             --filesystem="$PWD/.smoke" \
             --env=XDG_DATA_HOME="$PWD/.smoke/data" \
             --env=XDG_CONFIG_HOME="$PWD/.smoke/config" \
