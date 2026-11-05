@@ -132,7 +132,7 @@ Postcard starts with no window, gets new mail the moment it lands, and notifies 
 Postcard builds and runs entirely as a Flatpak, the same way it ships. There is no host-level `python app.py`. Everything goes through [`just`](https://github.com/casey/just)
 
 ```bash
-git clone --recurse-submodules https://github.com/gxanshu/postcard.git
+git clone --recurse-submodules https://github.com/tuna-os/postcard.git
 cd postcard
 just init # one-time: add Flathub, install the GNOME runtime + SDK
 just build # build from the working tree, install for --user
