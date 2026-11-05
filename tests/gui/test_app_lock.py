@@ -498,3 +498,26 @@ def test_move_timer_pauses_across_lock(tmp_path, monkeypatch):
         window._pending_move_timeout = 0
     finally:
         _close_window(window, settings, db)
+
+
+def test_open_composer_hides_with_the_lock_and_returns(tmp_path, monkeypatch):
+    app, db, window, account, settings, _calls = _make_window(tmp_path, monkeypatch)
+    from postcard.composer_window import PostcardComposerWindow
+
+    # Only a registered application tracks its windows, and the lock finds
+    # open composers through that list, as it does in the running app.
+    app.set_flags(Gio.ApplicationFlags.NON_UNIQUE)
+    app.register(None)
+    composer = PostcardComposerWindow(app, db, account, subject="draft in progress")
+    composer.present()
+    try:
+        assert composer.get_visible()
+
+        _screensaver(window, True)
+        assert not composer.get_visible()
+
+        _screensaver(window, False)
+        assert composer.get_visible()
+    finally:
+        composer.destroy()
+        _close_window(window, settings, db)

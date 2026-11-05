@@ -568,7 +568,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
 
     def _on_map(self, _window: Gtk.Window) -> None:
         # _update_reader guards on _account, so the first map of a window built
-        # on an empty database does nothing.
+        # on an empty database does nothing. Locked reads the closed cache,
+        # so a map then does nothing too.
+        if self._is_locked:
+            return
         self._update_reader()
 
     # Open one message by IMAP UID (from a notification). Clearing _rendered_id
@@ -3521,6 +3524,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._deferred_completions: list[
             tuple[Callable[..., bool], tuple[object, ...]]
         ] = []
+        # Composer windows this lock hid, for the unlock to re-show.
+        self._hidden_composers: list[PostcardComposerWindow] = []
         self._screensaver_watch = 0
         self._login_watch = 0
         # The undo window's deadline, so a lock can pause its timer and the
@@ -3616,6 +3621,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # is what a thumbnail taken mid-lock must catch.
         self.main_stack.set_visible_child_name(PAGE_LOCKED)
         logger.info("session locked; hiding mail and dropping connections")
+        self._hide_composers()
         mail_sync.close_sessions()
         self._db.close()
         # The undo window pauses with the timer: committing a move while the
@@ -3643,6 +3649,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             self._toast(_("Could not reopen the mail cache."))
             return
         self._is_locked = False
+        self._restore_composers()
         # First, in landing order: completions release the busy state this
         # sync would otherwise mistake for work still running.
         deferred, self._deferred_completions = self._deferred_completions, []
@@ -3684,3 +3691,51 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _defer(self, callback: Callable[..., bool], *args: object) -> None:
         """Hold one completion for the unlock to replay, in landing order."""
         self._deferred_completions.append((callback, args))
+
+    @property
+    def is_locked(self) -> bool:
+        return self._is_locked
+
+    def keep_hidden(self, composers: list[PostcardComposerWindow]) -> None:
+        """Take over composers another window's unlock could not re-show yet."""
+        self._hidden_composers.extend(
+            composer for composer in composers if composer not in self._hidden_composers
+        )
+
+    def _hide_composers(self) -> None:
+        # A composer left open shows its draft in the window list while the
+        # main window sits locked, so visible ones hide with the lock. Only
+        # visible ones are recorded: a user-minimized composer stays that way.
+        app = self.get_application()
+        if app is None:
+            return
+        for widget in app.get_windows():
+            if (
+                isinstance(widget, PostcardComposerWindow)
+                and widget.get_visible()
+                and widget not in self._hidden_composers
+            ):
+                self._hidden_composers.append(widget)
+                widget.set_visible(False)
+
+    def _restore_composers(self) -> None:
+        # ... unless another main window is still locked: that one inherits
+        # them, so the last unlock to run re-shows. Shown without raising, so
+        # the unlock never steals focus from where the user already is.
+        app = self.get_application()
+        hidden, self._hidden_composers = self._hidden_composers, []
+        still_locked = next(
+            (
+                widget
+                for widget in (app.get_windows() if app is not None else [])
+                if isinstance(widget, PostcardMainWindow)
+                and widget is not self
+                and widget.is_locked
+            ),
+            None,
+        )
+        if still_locked is not None:
+            still_locked.keep_hidden(hidden)
+            return
+        for composer in hidden:
+            composer.set_visible(True)
