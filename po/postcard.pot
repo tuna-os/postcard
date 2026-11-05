@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-05 01:26+0000\n"
+"POT-Creation-Date: 2026-11-05 01:50+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -226,7 +226,7 @@ msgstr ""
 
 #. Auth failures aren't worth a Retry button (same password); everything
 #. else is a transient connection problem the user can retry.
-#: src/postcard/application.py:121 src/postcard/window.py:3419
+#: src/postcard/application.py:121 src/postcard/window.py:3422
 msgid "Retry"
 msgstr ""
 
@@ -280,7 +280,7 @@ msgstr ""
 msgid "Insert Link"
 msgstr ""
 
-#: src/postcard/composer_window.py:744 src/postcard/window.py:2701
+#: src/postcard/composer_window.py:744 src/postcard/window.py:2704
 #: src/ui/account-dialog.blp:17 src/ui/composer-window.blp:17
 #: src/ui/fastmail-dialog.blp:38 src/ui/fastmail-dialog.blp:70
 #: src/ui/microsoft-dialog.blp:38 src/ui/microsoft-dialog.blp:70
@@ -301,13 +301,13 @@ msgstr ""
 msgid "Remove Attachment"
 msgstr ""
 
-#: src/postcard/composer_window.py:1008 src/postcard/window.py:1109
-#: src/postcard/window.py:1590 src/postcard/window.py:2500
-#: src/postcard/window.py:2808 src/postcard/window.py:3106
+#: src/postcard/composer_window.py:1008 src/postcard/window.py:1112
+#: src/postcard/window.py:1593 src/postcard/window.py:2503
+#: src/postcard/window.py:2811 src/postcard/window.py:3109
 msgid "Could not sign in to this account."
 msgstr ""
 
-#: src/postcard/composer_window.py:1059 src/postcard/window.py:2891
+#: src/postcard/composer_window.py:1059 src/postcard/window.py:2894
 #, python-brace-format
 msgid "Sent, but the copy couldn't be saved to Sent: {msg}."
 msgstr ""
@@ -328,7 +328,7 @@ msgstr ""
 msgid "Couldn't send: {msg}. Saved to Outbox."
 msgstr ""
 
-#: src/postcard/composer_window.py:1132 src/postcard/window.py:2948
+#: src/postcard/composer_window.py:1132 src/postcard/window.py:2951
 #, python-brace-format
 msgid ""
 "Sent to some recipients, but the server refused {addrs}. Kept in the Outbox."
@@ -745,63 +745,63 @@ msgstr[1] ""
 msgid "All Inboxes"
 msgstr ""
 
-#: src/postcard/window.py:1126
+#: src/postcard/window.py:1129
 #, python-brace-format
 msgid "Action failed: {msg}"
 msgstr ""
 
-#: src/postcard/window.py:1217 src/postcard/window.py:2350
+#: src/postcard/window.py:1220 src/postcard/window.py:2353
 #: src/ui/main-window.blp:242
 msgid "Mark Read"
 msgstr ""
 
-#: src/postcard/window.py:1219 src/postcard/window.py:2353
+#: src/postcard/window.py:1222 src/postcard/window.py:2356
 msgid "Mark Unread"
 msgstr ""
 
-#: src/postcard/window.py:1221 src/postcard/window.py:2357
+#: src/postcard/window.py:1224 src/postcard/window.py:2360
 msgid "Unstar"
 msgstr ""
 
-#: src/postcard/window.py:1221 src/postcard/window.py:2360
+#: src/postcard/window.py:1224 src/postcard/window.py:2363
 #: src/ui/main-window.blp:249
 msgid "Star"
 msgstr ""
 
-#: src/postcard/window.py:1228
+#: src/postcard/window.py:1231
 msgid "Edit Draft"
 msgstr ""
 
-#: src/postcard/window.py:1230 src/ui/main-window.blp:283
+#: src/postcard/window.py:1233 src/ui/main-window.blp:283
 msgid "Delete"
 msgstr ""
 
-#: src/postcard/window.py:1234
+#: src/postcard/window.py:1237
 msgid "Move to"
 msgstr ""
 
-#: src/postcard/window.py:1239 src/postcard/window.py:2702
+#: src/postcard/window.py:1242 src/postcard/window.py:2705
 #: src/ui/main-window.blp:262
 msgid "Unsubscribe"
 msgstr ""
 
-#: src/postcard/window.py:1258
+#: src/postcard/window.py:1261
 msgid "Unarchive"
 msgstr ""
 
-#: src/postcard/window.py:1259 src/ui/main-window.blp:272
+#: src/postcard/window.py:1262 src/ui/main-window.blp:272
 #: src/ui/main-window.blp:277
 msgid "Archive"
 msgstr ""
 
-#: src/postcard/window.py:1291
+#: src/postcard/window.py:1294
 #, python-brace-format
 msgid "Moved to {name}"
 msgid_plural "Moved {n} conversations to {name}"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:1314
+#: src/postcard/window.py:1317
 #, python-brace-format
 msgid "No {role} folder for {account}."
 msgstr ""
@@ -809,126 +809,126 @@ msgstr ""
 #. High priority: a normal toast queues behind whatever is on screen (a
 #. "no such folder" warning, say), and its 5s wait is the whole undo
 #. window -- Undo would appear only once the move had already gone out.
-#: src/postcard/window.py:1411 src/ui/composer-window.blp:159
+#: src/postcard/window.py:1414 src/ui/composer-window.blp:159
 msgid "Undo"
 msgstr ""
 
-#: src/postcard/window.py:1578 src/postcard/window.py:1604
+#: src/postcard/window.py:1581 src/postcard/window.py:1607
 #, python-brace-format
 msgid "Move failed: {msg}"
 msgstr ""
 
-#: src/postcard/window.py:2368
+#: src/postcard/window.py:2371
 msgid "Marking read is not supported by this account"
 msgstr ""
 
-#: src/postcard/window.py:2371
+#: src/postcard/window.py:2374
 msgid "Starring is not supported by this account"
 msgstr ""
 
-#: src/postcard/window.py:2451
+#: src/postcard/window.py:2454
 msgid "Postcard is locked."
 msgstr ""
 
 #. No UID and no cached copy: nothing to fetch until the next sync.
-#: src/postcard/window.py:2460
+#: src/postcard/window.py:2463
 msgid "This message hasn't finished syncing yet."
 msgstr ""
 
-#: src/postcard/window.py:2465
+#: src/postcard/window.py:2468
 msgid "This message's mailbox is no longer available."
 msgstr ""
 
-#: src/postcard/window.py:2565
+#: src/postcard/window.py:2568
 #, python-brace-format
 msgid "Couldn't save {name}."
 msgstr ""
 
-#: src/postcard/window.py:2578
+#: src/postcard/window.py:2581
 #, python-brace-format
 msgid "Couldn't save {name}: {msg}"
 msgstr ""
 
-#: src/postcard/window.py:2584
+#: src/postcard/window.py:2587
 #, python-brace-format
 msgid "Saved {name}."
 msgstr ""
 
-#: src/postcard/window.py:2640 src/postcard/window.py:2662
+#: src/postcard/window.py:2643 src/postcard/window.py:2665
 #, python-brace-format
 msgid "Couldn't open {name}."
 msgstr ""
 
-#: src/postcard/window.py:2696
+#: src/postcard/window.py:2699
 msgid "Unsubscribe from this list?"
 msgstr ""
 
-#: src/postcard/window.py:2697
+#: src/postcard/window.py:2700
 #, python-brace-format
 msgid "A request will be sent to {destination}."
 msgstr ""
 
-#: src/postcard/window.py:2744
+#: src/postcard/window.py:2747
 msgid "Couldn't unsubscribe. The list didn't accept the request."
 msgstr ""
 
-#: src/postcard/window.py:2746
+#: src/postcard/window.py:2749
 msgid "Unsubscribed. It can take a few days to take effect."
 msgstr ""
 
-#: src/postcard/window.py:2882
+#: src/postcard/window.py:2885
 #, python-brace-format
 msgid "Sent {n} queued message(s)."
 msgstr ""
 
-#: src/postcard/window.py:2920
+#: src/postcard/window.py:2923
 msgid ""
 "A message may have been sent. Check Sent before trying again. Kept in the "
 "Outbox."
 msgstr ""
 
-#: src/postcard/window.py:2955
+#: src/postcard/window.py:2958
 #, python-brace-format
 msgid "Sent to some recipients, but the server refused {addrs}. Will retry."
 msgstr ""
 
-#: src/postcard/window.py:2991
+#: src/postcard/window.py:2994
 #, python-brace-format
 msgid "Couldn't send a queued message. {reason}"
 msgid_plural "Couldn't send {n} queued messages. {reason}"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:3325
+#: src/postcard/window.py:3328
 #, python-brace-format
 msgid "{n} new message"
 msgid_plural "{n} new messages"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/postcard/window.py:3343
+#: src/postcard/window.py:3346
 #, python-brace-format
 msgid "{n} new messages"
 msgstr ""
 
-#: src/postcard/window.py:3411
+#: src/postcard/window.py:3414
 #, python-brace-format
 msgid "{account}: {reason}"
 msgstr ""
 
-#: src/postcard/window.py:3428
+#: src/postcard/window.py:3431
 msgid "You're offline. Postcard will reconnect when your connection returns."
 msgstr ""
 
-#: src/postcard/window.py:3477
+#: src/postcard/window.py:3480
 msgid "Postcard is running in the background"
 msgstr ""
 
-#: src/postcard/window.py:3478
+#: src/postcard/window.py:3481
 msgid "It will keep checking for new mail. Quit to stop."
 msgstr ""
 
-#: src/postcard/window.py:3643
+#: src/postcard/window.py:3649
 msgid "Could not reopen the mail cache."
 msgstr ""
 
