@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: postcard\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-05 00:38+0000\n"
+"POT-Creation-Date: 2026-11-05 01:06+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -566,20 +566,17 @@ msgstr ""
 msgid "Any IMAP account, set up by hand"
 msgstr ""
 
-#: src/postcard/fastmail_dialog.py:63 src/postcard/microsoft_dialog.py:63
-#: src/postcard/proton_dialog.py:82 src/postcard/tuta_dialog.py:84
+#: src/postcard/fastmail_dialog.py:63 src/postcard/fastmail_dialog.py:114
+#: src/postcard/microsoft_dialog.py:63 src/postcard/proton_dialog.py:82
+#: src/postcard/tuta_dialog.py:84
 msgid "This account is already added."
 msgstr ""
 
-#: src/postcard/fastmail_dialog.py:66
-msgid "Fastmail sign-in is not available in this build yet."
-msgstr ""
-
-#: src/postcard/fastmail_dialog.py:69 src/postcard/microsoft_dialog.py:69
+#: src/postcard/fastmail_dialog.py:66 src/postcard/microsoft_dialog.py:69
 msgid "No web browser is available to complete the sign-in."
 msgstr ""
 
-#: src/postcard/fastmail_dialog.py:99 src/postcard/microsoft_dialog.py:99
+#: src/postcard/fastmail_dialog.py:96 src/postcard/microsoft_dialog.py:99
 msgid "Could not open the browser."
 msgstr ""
 

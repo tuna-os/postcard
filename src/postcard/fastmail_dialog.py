@@ -6,7 +6,7 @@ from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
 from .core import secrets
 from .core.models.account import FASTMAIL_HOST, FASTMAIL_PORT, PROTOCOL_JMAP
-from .core.net import errors, fastmail_login, fastmail_oauth
+from .core.net import errors, fastmail_login
 from .core.store.database import Database
 
 logger = logging.getLogger(__name__)
@@ -62,9 +62,6 @@ class PostcardFastmailDialog(Adw.Dialog):
         ):
             self._toast(_("This account is already added."))
             return
-        if not fastmail_oauth.FASTMAIL_CLIENT_ID:
-            self._toast(_("Fastmail sign-in is not available in this build yet."))
-            return
         if Gio.AppInfo.get_default_for_uri_scheme("https") is None:
             self._toast(_("No web browser is available to complete the sign-in."))
             return
@@ -104,9 +101,22 @@ class PostcardFastmailDialog(Adw.Dialog):
     ) -> bool:
         if self._cancelled:
             return False
+        # The grant belongs to whoever authenticated in the browser, which
+        # may differ from the typed address; the account is saved under
+        # the authenticated one, and the row shows it.
+        effective = result.username or email
+        if effective != email:
+            logger.info("Fastmail sign-in for %s authenticated as %s", email, effective)
+        if any(
+            account.email.casefold() == effective.casefold()
+            for account in self._db.accounts()
+        ):
+            self._toast(_("This account is already added."))
+            self.dialog_stack.set_visible_child_name(PAGE_FORM)
+            return False
         try:
             account = self._db.save_account(
-                email=email,
+                email=effective,
                 display_name=display_name,
                 imap_host=FASTMAIL_HOST,
                 imap_port=FASTMAIL_PORT,
@@ -116,7 +126,7 @@ class PostcardFastmailDialog(Adw.Dialog):
             )
             secrets.store_password(account.id, result.stored)
         except Exception as error:
-            logger.exception("could not save the Fastmail account %s", email)
+            logger.exception("could not save the Fastmail account %s", effective)
             _is_auth_failure, message = errors.classify(error, FASTMAIL_HOST)
             self._toast(message)
             self.dialog_stack.set_visible_child_name(PAGE_FORM)
