@@ -353,6 +353,26 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
         };
       };
     }
+
+    StackPage {
+      name: "locked";
+      child: Adw.ToolbarView {
+        [top]
+        Adw.HeaderBar {}
+
+        content: Adw.StatusPage {
+          icon-name: "system-lock-screen-symbolic";
+          title: _("Postcard Is Locked");
+          description: _("Mail is hidden while the session is locked. It unlocks automatically when you return.");
+          child: Gtk.Button unlock_button {
+            label: _("Unlock");
+            halign: center;
+
+            styles ["suggested-action", "pill"]
+          };
+        };
+      };
+    }
       }
     };
   };
