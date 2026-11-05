@@ -4,7 +4,8 @@
   "runtime-version": "51",
   "sdk": "org.gnome.Sdk",
   "sdk-extensions": [
-    "org.freedesktop.Sdk.Extension.rust-stable"
+    "org.freedesktop.Sdk.Extension.rust-stable",
+    "org.freedesktop.Sdk.Extension.golang"
   ],
   "command": "postcard",
   "finish-args": [
@@ -85,6 +86,29 @@
           ]
         },
         "native/tuta/cargo-sources.json"
+      ]
+    },
+    {
+      "name": "postcard-proton",
+      "buildsystem": "simple",
+      "build-options": {
+        "append-path": "/usr/lib/sdk/golang/bin",
+        "env": {
+          "GOFLAGS": "-mod=vendor",
+          "GOPATH": "/run/build/postcard-proton/gopath",
+          "GOCACHE": "/run/build/postcard-proton/gocache",
+          "GOPROXY": "off"
+        }
+      },
+      "build-commands": [
+        "go build -o postcard-proton .",
+        "install -Dm755 postcard-proton /app/bin/postcard-proton"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "native/proton"
+        }
       ]
     },
     {

@@ -42,7 +42,7 @@ The reply is always exactly one line.
 
 ```sh
 cd native/proton
-gofmt -l .            # must print nothing
+gofmt -l . | grep -v '^vendor/'  # must print nothing; vendor/ is third-party
 go vet ./...
 go test ./...
 go build -o postcard-proton .
@@ -57,13 +57,10 @@ POSTCARD_PROTON_TEST_BINARY=$PWD/native/proton/postcard-proton \
   python3 -m pytest tests/core/net/test_proton_session.py
 ```
 
-## Research: what the real helper will use
-
-Surveyed from the module cache (see `proton-native.yml` for the pinned
-versions once the helper takes dependencies):
+## Dependencies
 
 - [`go-proton-api`](https://github.com/ProtonMail/go-proton-api) `v0.4.0`
-  (latest) covers the whole roadmap: SRP login + 2FA (`auth.go`),
+  covers the whole roadmap: SRP login + 2FA (`auth.go`),
   `GetMessageMetadataPage` / `CountMessages` / `GetFullMessage` for sync,
   `CreateDraft` + `SendDraft` for sending,
   `LabelMessages` / `MarkMessagesRead` for flags,
@@ -73,6 +70,28 @@ versions once the helper takes dependencies):
 - Unlike Tuta — whose `tuta-sdk` crate has no send API, which is why Tuta
   sending is deferred — Proton sending is a library call, so the helper can
   implement `send` in the same pass as `sync`.
+
+The pinned toolchain is Go 1.24.13 in `proton-native.yml`; `go.mod`'s `go`
+directive stays the minimum floor.
+
+## Flatpak packaging
+
+The manifest builds the helper and installs it to `/app/bin`, so the
+Python adapter finds it with `shutil.which("postcard-proton")` inside the
+sandbox:
+
+- The `postcard-proton` manifest module runs
+  `go build` with `GOFLAGS=-mod=vendor` and `GOPROXY=off` from a
+  `native/proton` dir source. The build sandbox has no network, so
+  dependencies ship as the committed `vendor/` tree (~17 MiB) rather than a
+  module-cache tarball. After any `go.mod`/`go.sum` change, re-run
+  `go mod vendor` and commit the result — CI fails loudly on a stale tree.
+- `GOPATH` and `GOCACHE` point at the module's build directory, which is
+  writable in the sandbox; the host paths they default to are not.
+- The Go toolchain comes from the
+  `org.freedesktop.Sdk.Extension.golang` SDK extension (declared in
+  `sdk-extensions`, on PATH via `append-path`); `just init` installs it
+  from the manifest. The GNOME SDK itself ships no `go`.
 
 ## Roadmap
 
