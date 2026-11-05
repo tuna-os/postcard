@@ -8,12 +8,10 @@ name: Accessibility metadata
 # compile can never agree with the SDK about the tree. The GUI suite itself
 # runs in gui-tests.yml, which picks up tests/gui/test_a11y.py wholesale.
 on:
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'po/**'
-      - 'data/**'
-      - '.github/workflows/a11y.yml'
+  # No pull_request trigger of its own: pr-gate.yml is the one PR entrypoint
+  # and calls this lane on every PR, which keeps path filters from deadlocking
+  # the required check.
+  workflow_call:
   workflow_dispatch:
 
 permissions:

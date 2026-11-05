@@ -1,0 +1,168 @@
+name: Flatpak build
+
+# The one Flatpak build definition, shared by PR validation and release.
+# Unsigned and unpublished by default: signing activates only when the caller
+# passes a key id (release does; PR validation never does), and this workflow
+# publishes nothing anywhere. It has no pull_request trigger of its own -- it
+# only runs when called, so PR code can neither reach signing secrets (none
+# are passed on that path) nor skip the build.
+on:
+  workflow_call:
+    inputs:
+      arch:
+        description: "Flatpak arch to build (x86_64 or aarch64)."
+        required: true
+        type: string
+      runner:
+        description: "Runner label matching arch (ubuntu-24.04 or ubuntu-24.04-arm)."
+        required: true
+        type: string
+      upload-repo-tar:
+        description: "Upload the ostree repo tarball (release merges it; smoke needs the bundle)."
+        required: false
+        type: boolean
+        default: false
+      upload-bundle:
+        description: "Upload a single-file .flatpak bundle for installed smoke tests."
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      gpg-key-id:
+        description: "Public key id to sign commits with. Release-only; omitted builds unsigned."
+        required: false
+      gpg-private-key:
+        description: "Base64 private key for signing. Release-only; PR callers omit it."
+        required: false
+    outputs:
+      repo-artifact:
+        description: "Uploaded repo tarball artifact name (empty unless upload-repo-tar)."
+        value: ${{ jobs.build.outputs.repo-artifact }}
+      bundle-artifact:
+        description: "Uploaded bundle artifact name (empty unless upload-bundle)."
+        value: ${{ jobs.build.outputs.bundle-artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    container:
+      # Pinned digest of the gnome-51 builder image. Refresh together with
+      # release.yml's BUILDER_DIGEST and publish image (see
+      # docs/supply-chain.md); hive-health verifies the three stay identical.
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51@sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
+      options: --privileged
+    outputs:
+      repo-artifact: ${{ steps.names.outputs.repo-artifact }}
+      bundle-artifact: ${{ steps.names.outputs.bundle-artifact }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+
+      - name: Prepare and verify the pinned SDK
+        run: python3 native/tuta/upstream/scripts/sdk-prepare.py
+
+      - name: Set up the build environment
+        run: |
+          # A container has no machine-id (dbus won't start) and no /dev/fuse.
+          tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
+
+      # The builder image carries the SDK and Platform but not the manifest's
+      # sdk-extensions (rust-stable, golang): without this step the build
+      # fails with "extension ... not installed". Same command `just init`
+      # runs; the build dir need not exist for --install-deps-only.
+      - name: Install the SDK extensions the manifest needs
+        run: |
+          flatpak remote-add --if-not-exists --user \
+            flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak-builder --install-deps-from=flathub --install-deps-only \
+            --user build in.gxanshu.postcard.json
+
+      # Release-only: PR callers pass no secrets, so this step never executes
+      # on the PR path. The key id is public, but secrets is the only channel
+      # a caller can use to pass a secret-sourced value.
+      - name: Import the signing key
+        if: env.GPG_KEY_ID != ''
+        env:
+          GPG_KEY_ID: ${{ secrets.gpg-key-id }}
+          GPG_PRIVATE_KEY: ${{ secrets.gpg-private-key }}
+        run: echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --import
+
+      - name: Restore the flatpak-builder source cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          # flatpak-builder keeps its git checkouts and downloads here (the
+          # --state-dir default); the manifest plus the native lockfiles key
+          # it, so a dependency bump starts cold instead of half-stale. No
+          # --disable-updates: a cache miss must still download, never fail.
+          path: .flatpak-builder
+          key: flatpak-builder-${{ inputs.arch }}-${{ hashFiles('in.gxanshu.postcard.json', 'native/tuta/Cargo.lock', 'native/tuta/cargo-sources.json', 'native/proton/go.sum') }}
+          restore-keys: |
+            flatpak-builder-${{ inputs.arch }}-
+
+      # Commits are signed here, not at merge time: `ostree pull-local` copies
+      # commit objects verbatim, so a signature made now survives into the
+      # merged repo, and re-signing commits afterwards would mean rewriting them.
+      - name: Build the repo
+        env:
+          GPG_KEY_ID: ${{ secrets.gpg-key-id }}
+        run: |
+          set -o pipefail
+          sign_args=()
+          if [ -n "$GPG_KEY_ID" ]; then
+            sign_args+=(--gpg-sign="$GPG_KEY_ID")
+          fi
+          flatpak-builder --force-clean --user --disable-rofiles-fuse \
+            --repo=repo "${sign_args[@]}" build in.gxanshu.postcard.json \
+            2>&1 | tee build.log
+
+      - name: Name the artifacts
+        id: names
+        run: |
+          if [ "${{ inputs.upload-repo-tar }}" = "true" ]; then
+            echo "repo-artifact=repo-${{ inputs.arch }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "repo-artifact=" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${{ inputs.upload-bundle }}" = "true" ]; then
+            echo "bundle-artifact=postcard-bundle-${{ inputs.arch }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "bundle-artifact=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # tar first: upload-artifact flattens symlinks and drops permissions, both
+      # of which an ostree object store depends on.
+      - name: Pack the repo
+        if: inputs.upload-repo-tar
+        run: tar -cf "repo-${{ inputs.arch }}.tar" repo
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.upload-repo-tar
+        with:
+          name: repo-${{ inputs.arch }}
+          path: repo-${{ inputs.arch }}.tar
+          retention-days: 1
+
+      - name: Export the bundle
+        if: inputs.upload-bundle
+        run: flatpak build-bundle repo "postcard-${{ inputs.arch }}.flatpak" in.gxanshu.postcard
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.upload-bundle
+        with:
+          name: postcard-bundle-${{ inputs.arch }}
+          path: postcard-${{ inputs.arch }}.flatpak
+          retention-days: 1
+
+      - name: Upload the build log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: build-${{ inputs.arch }}-diagnostics
+          path: build.log
+          retention-days: 7
+          if-no-files-found: warn
