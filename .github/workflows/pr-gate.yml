@@ -151,6 +151,17 @@ jobs:
           import importlib
           import sys
 
+          # What the installed launcher (src/postcard.in) does before the
+          # first import: pin the GI versions and register the bundled
+          # resources, which every Gtk.Template class loads at import time.
+          import gi
+
+          gi.require_version("Gtk", "4.0")
+          gi.require_version("Adw", "1")
+          from gi.repository import Gio
+
+          Gio.Resource.load("/app/share/postcard/postcard.gresource")._register()
+
           names = open(sys.argv[1]).read().split()
           failures = []
           for name in names:
