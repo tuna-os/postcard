@@ -2,6 +2,11 @@
 
 Spoken over D-Bus rather than through libgoa: Goa-1.0.typelib is not in the
 GNOME runtime, and the D-Bus API is the same thing one layer down.
+
+The service is optional: both entry points fail closed -- an empty listing,
+no credential -- when it is missing, slow, or answering with garbage. They
+never raise and never start the service themselves, so an isolated profile
+without Online Accounts behaves like one whose accounts all signed out.
 """
 
 import logging
@@ -42,10 +47,16 @@ _SMTP_IMPLICIT_TLS_PORT = 465
 _SMTP_STARTTLS_PORT = 587
 _SMTP_PORT = 25
 
-_TIMEOUT_MS = NET_TIMEOUT_SECONDS * 1000
+# Listing accounts is one local round trip, so it fails fast; fetching a token
+# can spend a network round trip refreshing an expired one, so it waits.
+_LIST_TIMEOUT_MS = 5_000
+_TOKEN_TIMEOUT_MS = NET_TIMEOUT_SECONDS * 1000
 _PROXY_FLAGS = (
     Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES
     | Gio.DBusProxyFlags.DO_NOT_CONNECT_SIGNALS
+    # A missing service stays missing: reaching it must not D-Bus-activate
+    # Online Accounts (and block on its startup) in a profile without one.
+    | Gio.DBusProxyFlags.DO_NOT_AUTO_START
 )
 
 Properties = dict[str, object]
@@ -122,23 +133,37 @@ def mail_accounts() -> list[OnlineAccount]:
     Accounts that cannot do mail come back with is_mail_supported False rather
     than being dropped, so the caller can say why they are unavailable -- a
     GOA "Exchange" account is the common case, since it signs in to EWS.
+
+    Never raises: a missing service, a timeout, or a reply Postcard cannot
+    read all come back as an empty listing. One unreadable object does not
+    hide the rest.
     """
     try:
         objects = _managed_objects()
-    except GLib.Error:
+    except Exception:
         logger.debug("could not list GNOME Online Accounts", exc_info=True)
+        return []
+    try:
+        entries = list(objects.values())
+    except Exception:
+        logger.debug("could not read GNOME Online Accounts", exc_info=True)
         return []
 
     accounts = []
-    for interfaces in objects.values():
-        account = interfaces.get(_ACCOUNT)
-        if account is None or account.get("IsTemporary"):
-            continue
-        # Mail switched off for this account in Settings: the user already said
-        # no, and listing it as "unsupported" would misstate why.
-        if account.get("MailDisabled"):
-            continue
-        accounts.append(online_account(account, interfaces))
+    for interfaces in entries:
+        try:
+            account = interfaces.get(_ACCOUNT)
+            if account is None or account.get("IsTemporary"):
+                continue
+            # Mail switched off for this account in Settings: the user already
+            # said no, and listing it as "unsupported" would misstate why.
+            if account.get("MailDisabled"):
+                continue
+            accounts.append(online_account(account, interfaces))
+        except Exception:
+            logger.debug(
+                "skipping an online account Postcard cannot read", exc_info=True
+            )
     return accounts
 
 
@@ -179,45 +204,76 @@ def credential(goa_id: str) -> Credential | None:
 
     Read on every use rather than copied into the keyring, because an OAuth
     access token expires within the hour.
+
+    Never raises -- workers call secrets.credential_for outside their try
+    block, so anything but a usable token reads as "could not sign in".
     """
+    if not goa_id:
+        return None
     try:
         objects = _managed_objects()
-    except GLib.Error:
+    except Exception:
         logger.warning("could not reach GNOME Online Accounts", exc_info=True)
         return None
 
-    match = next(
-        (
-            (path, interfaces)
-            for path, interfaces in objects.items()
-            if interfaces.get(_ACCOUNT, {}).get("Id") == goa_id
-        ),
-        None,
-    )
-    if match is None:
-        logger.warning("online account %s is gone from GNOME Online Accounts", goa_id)
+    found = _find_account(objects, goa_id)
+    if found is None:
         return None
 
-    path, interfaces = match
-    if _OAUTH2 not in interfaces:
+    path, interfaces = found
+    if not isinstance(interfaces, dict) or _OAUTH2 not in interfaces:
         logger.warning("online account %s no longer signs in with OAuth", goa_id)
         return None
 
-    try:
-        token = _call(path, _OAUTH2, "GetAccessToken").unpack()[0]
-    except GLib.Error:
-        logger.warning(
-            "could not get an access token for online account %s", goa_id, exc_info=True
-        )
+    token = _access_token(path, goa_id)
+    if token is None:
         return None
 
     mail = interfaces.get(_MAIL, {})
+    if not isinstance(mail, dict):
+        mail = {}
     user = str(mail.get("ImapUserName") or mail.get("EmailAddress", ""))
     return Credential(user, token, MECHANISM_XOAUTH2)
 
 
+def _find_account(
+    objects: dict[str, Interfaces], goa_id: str
+) -> tuple[str, Interfaces] | None:
+    """The bus path and interfaces of one online account, if it is still there."""
+    try:
+        match = next(
+            (
+                (path, interfaces)
+                for path, interfaces in objects.items()
+                if interfaces.get(_ACCOUNT, {}).get("Id") == goa_id
+            ),
+            None,
+        )
+    except Exception:
+        logger.warning("could not read GNOME Online Accounts", exc_info=True)
+        return None
+    if match is None:
+        logger.warning("online account %s is gone from GNOME Online Accounts", goa_id)
+    return match
+
+
+def _access_token(path: str, goa_id: str) -> str | None:
+    """The live OAuth token for one object path, if the service gives one."""
+    try:
+        token = _call(path, _OAUTH2, "GetAccessToken", _TOKEN_TIMEOUT_MS).unpack()[0]
+    except Exception:
+        logger.warning(
+            "could not get an access token for online account %s", goa_id, exc_info=True
+        )
+        return None
+    if not isinstance(token, str) or not token:
+        logger.warning("online account %s gave an unusable access token", goa_id)
+        return None
+    return token
+
+
 def _managed_objects() -> dict[str, Interfaces]:
-    reply = _call(OBJECT_PATH, _OBJECT_MANAGER, "GetManagedObjects")
+    reply = _call(OBJECT_PATH, _OBJECT_MANAGER, "GetManagedObjects", _LIST_TIMEOUT_MS)
     return reply.unpack()[0]
 
 
@@ -225,6 +281,7 @@ def _call(
     object_path: str,
     interface: str,
     method: str,
+    timeout_ms: int,
 ) -> GLib.Variant:
     proxy = Gio.DBusProxy.new_for_bus_sync(
         Gio.BusType.SESSION,
@@ -235,4 +292,4 @@ def _call(
         interface,
         None,
     )
-    return proxy.call_sync(method, None, Gio.DBusCallFlags.NONE, _TIMEOUT_MS, None)
+    return proxy.call_sync(method, None, Gio.DBusCallFlags.NONE, timeout_ms, None)
