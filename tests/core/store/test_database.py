@@ -819,6 +819,133 @@ def test_a_wrong_key_opens_nothing(tmp_path):
 
 
 @needs_sqlcipher
+def test_a_cache_without_its_key_opens_nothing(tmp_path):
+    path = str(tmp_path / "postcard.db")
+    Database(path, key=_CACHE_KEY).close()
+
+    with pytest.raises(sqlite3.DatabaseError):
+        sqlite3.connect(path).execute("SELECT count(*) FROM sqlite_master").fetchone()
+
+
+@needs_sqlcipher
+def test_a_tampered_page_fails_closed(tmp_path):
+    path = tmp_path / "postcard.db"
+    Database(str(path), key=_CACHE_KEY).close()
+
+    raw = bytearray(path.read_bytes())
+    raw[100] ^= 0xFF
+    path.write_bytes(bytes(raw))
+
+    with pytest.raises(CacheError) as caught:
+        Database(str(path), key=_CACHE_KEY)
+    assert caught.value.code == "unlock_failed"
+
+
+@needs_sqlcipher
+def test_every_open_pins_the_cipher_suite(tmp_path):
+    path = str(tmp_path / "postcard.db")
+    for _ in range(2):
+        database = Database(path, key=_CACHE_KEY)
+        try:
+            assert database._conn.execute("PRAGMA kdf_iter").fetchone()[0] == "256000"
+            assert (
+                database._conn.execute("PRAGMA cipher_kdf_algorithm").fetchone()[0]
+                == "PBKDF2_HMAC_SHA512"
+            )
+            assert (
+                database._conn.execute("PRAGMA cipher_hmac_algorithm").fetchone()[0]
+                == "HMAC_SHA512"
+            )
+            assert (
+                database._conn.execute("PRAGMA cipher_memory_security").fetchone()[0]
+                == "1"
+            )
+        finally:
+            database.close()
+
+
+def test_a_drifted_cipher_suite_fails_closed():
+    answers = {
+        "kdf_iter": "1000",
+        "cipher_kdf_algorithm": database_module._KDF_ALGORITHM,
+        "cipher_hmac_algorithm": database_module._HMAC_ALGORITHM,
+        "cipher_memory_security": "1",
+    }
+
+    class _Cursor:
+        def __init__(self, value):
+            self._value = value
+
+        def fetchone(self):
+            return (self._value,)
+
+    class _Conn:
+        def execute(self, sql):
+            return _Cursor(answers[sql.removeprefix("PRAGMA ").strip()])
+
+    with pytest.raises(CacheError) as caught:
+        database_module._assert_cipher_suite(_Conn())
+    assert caught.value.code == "unlock_failed"
+
+
+@needs_sqlcipher
+def test_a_cache_from_another_suite_opens_nothing(tmp_path):
+    path = tmp_path / "postcard.db"
+    conn = database_module._sqlcipher.connect(str(path))
+    conn.execute(f"PRAGMA key = \"x'{_CACHE_KEY.hex()}'\"")
+    conn.execute("PRAGMA cipher_hmac_algorithm = HMAC_SHA256")
+    conn.execute("CREATE TABLE t(x)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(CacheError) as caught:
+        Database(str(path), key=_CACHE_KEY)
+    assert caught.value.code == "unlock_failed"
+
+
+@needs_sqlcipher
+def test_no_plaintext_lingers_in_the_file_or_its_sidecars(tmp_path):
+    path = tmp_path / "postcard.db"
+    marker = "plaintext-probe-7f3a9c"
+    database = Database(str(path), key=_CACHE_KEY)
+    account = database.save_account(
+        f"{marker}@example.com",
+        "Me",
+        "imap.example.com",
+        993,
+        "smtp.example.com",
+        587,
+    )
+    folder = database.get_or_create_folder(account.id, "INBOX")
+    incoming(
+        database,
+        folder.id,
+        "1",
+        subject=f"subject {marker}",
+        preview=f"preview {marker}",
+    )
+    # The FTS index holds the marker too, and still answers while encrypted.
+    assert database.search_conversations([folder.id], marker)
+
+    def _sidecar_bytes():
+        blobs = []
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = tmp_path / f"postcard.db{suffix}"
+            if sidecar.exists():
+                blobs.append(sidecar.read_bytes())
+        return blobs
+
+    assert all(marker.encode() not in blob for blob in _sidecar_bytes())
+    database._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    database.close()
+
+    stored = path.read_bytes()
+    assert not stored.startswith(b"SQLite format 3\x00")
+    assert marker.encode() not in stored
+    assert all(marker.encode() not in blob for blob in _sidecar_bytes())
+
+
+@needs_sqlcipher
 def test_a_plaintext_cache_migrates_in_place(tmp_path):
     path = tmp_path / "postcard.db"
     plain = sqlite3.connect(str(path))
