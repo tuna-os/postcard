@@ -1,19 +1,24 @@
 name: Proton native prototype
+
+# No pull_request trigger of its own: pr-gate.yml is the one PR entrypoint and
+# calls this lane on every PR, which keeps path filters from deadlocking the
+# required check.
 on:
-  pull_request:
-    paths:
-      - 'native/proton/**'
-      - 'src/postcard/core/net/proton*.py'
-      - 'tests/core/net/test_proton*.py'
-      - '.github/workflows/proton-native.yml'
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   native:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Restore the pip cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           # Exact patch, not '1.24': setup-go resolves short versions to the
@@ -30,6 +35,7 @@ jobs:
           cd native/proton
           go mod vendor
           git diff --exit-code -- vendor/ go.mod go.sum
+      # No Go module cache: the build is -mod=vendor, so nothing is downloaded.
       - name: Vet, build and test the helper stub
         run: |
           cd native/proton

@@ -14,14 +14,17 @@ permissions:
 env:
   APP_ID: in.gxanshu.postcard
   DOMAIN: postcard.gxanshu.in
-  # Pinned digest of the gnome-51 builder image below. Refresh both together
-  # (see docs/supply-chain.md); the provenance record embeds this value.
+  # Pinned digest of the gnome-51 builder image. Refresh together with the
+  # identical pins in flatpak-build.yml and the publish job below (see
+  # docs/supply-chain.md); hive-health verifies the three stay identical, and
+  # the provenance record embeds this value.
   BUILDER_DIGEST: sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
 
 jobs:
   # Release only when the version in meson.build has no matching git tag yet.
   check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.v.outputs.version }}
       new: ${{ steps.v.outputs.new }}
@@ -38,12 +41,28 @@ jobs:
           else
             echo "new=true" >> "$GITHUB_OUTPUT"
           fi
+      # Fail in seconds, not after two full arch builds, when the signing
+      # secrets are missing: without them publish cannot sign and the builds
+      # are doomed. Only presence is tested; the values stay masked.
+      - name: Require signing secrets for a new release
+        if: steps.v.outputs.new == 'true'
+        env:
+          GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+          GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          if [ -z "$GPG_KEY_ID" ] || [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::version $VERSION has no tag but the FLATPAK_GPG_* secrets are not configured; refusing to burn two arch builds that publish cannot sign."
+            exit 1
+          fi
 
   # Never publish a build whose tests don't pass.
   test:
     uses: ./.github/workflows/tests.yml
 
-
+  # The shared flatpak-build.yml, signed: the same build PR validation runs,
+  # plus per-commit signatures. Release is the only caller that passes keys;
+  # both travel only on this release path, never to PR jobs.
   build:
     needs: [check, test]
     if: needs.check.outputs.new == 'true'
@@ -55,44 +74,15 @@ jobs:
             runner: ubuntu-24.04
           - arch: aarch64
             runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51@sha256:78d969b18225ae107ca29497bf09c4a3f791e5f1838a9a912a529d0024fb6210
-      options: --privileged
-    env:
-      GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY_ID }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          submodules: recursive
-
-      - name: Prepare and verify the pinned SDK
-        run: python3 native/tuta/upstream/scripts/sdk-prepare.py
-
-      - name: Set up the build environment
-        run: |
-          # A container has no machine-id (dbus won't start) and no /dev/fuse.
-          tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
-          echo "${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}" | base64 -d | gpg --import
-
-      # Commits are signed here, not at merge time: `ostree pull-local` copies
-      # commit objects verbatim, so a signature made now survives into the
-      # merged repo, and re-signing commits afterwards would mean rewriting them.
-      - name: Build and sign the repo
-        run: |
-          flatpak-builder --force-clean --user --disable-rofiles-fuse \
-            --repo=repo --gpg-sign="$GPG_KEY" build "$APP_ID.json"
-
-      # tar first: upload-artifact flattens symlinks and drops permissions, both
-      # of which an ostree object store depends on.
-      - name: Pack the repo
-        run: tar -cf "repo-${{ matrix.arch }}.tar" repo
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: repo-${{ matrix.arch }}
-          path: repo-${{ matrix.arch }}.tar
-          retention-days: 1
+    uses: ./.github/workflows/flatpak-build.yml
+    with:
+      arch: ${{ matrix.arch }}
+      runner: ${{ matrix.runner }}
+      upload-repo-tar: true
+      upload-bundle: false
+    secrets:
+      gpg-key-id: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+      gpg-private-key: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
 
   # SPDX SBOM of the release source, attached to the GitHub release beside the
   # .flatpakref. Scans the same commit the build uses; additive only.
@@ -100,6 +90,7 @@ jobs:
     needs: [check]
     if: needs.check.outputs.new == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -126,6 +117,7 @@ jobs:
     needs: [check, build, sbom]
     if: needs.check.outputs.new == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write

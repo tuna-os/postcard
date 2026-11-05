@@ -1,0 +1,276 @@
+name: PR gate
+
+# The one PR entrypoint: every lane runs on every PR, with no path filters, so
+# a skipped lane can never deadlock the required check. Lanes are the existing
+# workflows called as reusable jobs; the build is the shared unsigned
+# flatpak-build.yml both arches, whose bundles feed the installed smoke below
+# and the GUI suite. The `gate` job at the end is the required check.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A re-push supersedes the run before it; without this, rapid pushes queue
+# full 2-arch builds behind each other.
+concurrency:
+  group: pr-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    uses: ./.github/workflows/flatpak-build.yml
+    with:
+      arch: ${{ matrix.arch }}
+      runner: ${{ matrix.runner }}
+      upload-repo-tar: false
+      upload-bundle: true
+
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  tuta:
+    uses: ./.github/workflows/tuta-native.yml
+
+  proton:
+    uses: ./.github/workflows/proton-native.yml
+
+  a11y:
+    uses: ./.github/workflows/a11y.yml
+
+  # x86_64 only: the suite is Python/GTK and arch-independent, and the build
+  # matrix already compiles every arch. Revisit if an arch-specific GUI fault
+  # ever appears.
+  gui:
+    needs: [build]
+    uses: ./.github/workflows/gui-tests.yml
+    with:
+      app-bundle-artifact: postcard-bundle-x86_64
+
+  # Installed smoke: install the unsigned PR bundle and prove the installed
+  # tree runs -- launch, helpers, installed Python and the contract suites.
+  # No credentials anywhere: every probe expects an error envelope.
+  smoke:
+    needs: [build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Flatpak tooling and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak xvfb
+
+      - name: Restore the Flatpak runtime cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.local/share/flatpak
+          # The arch is part of the key: runtimes are per-arch and a shared
+          # key would poison one leg with the other's binaries.
+          key: flatpak-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('in.gxanshu.postcard.json') }}
+
+      - name: Install the runtime the manifest asks for
+        run: |
+          flatpak remote-add --if-not-exists --user \
+            flathub https://flathub.org/repo/flathub.flatpakrepo
+          runtime=$(python3 -c "import json; print(json.load(open('in.gxanshu.postcard.json'))['runtime-version'])")
+          flatpak install --user -y flathub "org.gnome.Platform//$runtime"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: postcard-bundle-${{ matrix.arch }}
+          path: bundle
+
+      - name: Install the bundle
+        run: flatpak install --user -y bundle/*.flatpak
+
+      - name: Discover the installed helpers
+        run: |
+          flatpak run --command=sh in.gxanshu.postcard -c \
+            'command -v postcard-tuta && command -v postcard-proton && ls -l /app/bin/postcard-tuta /app/bin/postcard-proton'
+
+      # Full launch with nowhere to read or write outside .smoke/: proves the
+      # installed Python, gresource and desktop entry boot together. No secret
+      # service runs here, so the app must reach its locked-keyring state and
+      # stay there -- exiting early or logging a traceback fails.
+      - name: Launch the installed app with isolated state
+        run: |
+          mkdir -p .smoke/data .smoke/config .smoke/cache
+          set +e
+          timeout 60 xvfb-run -a flatpak run \
+            --filesystem="$PWD/.smoke" \
+            --env=XDG_DATA_HOME="$PWD/.smoke/data" \
+            --env=XDG_CONFIG_HOME="$PWD/.smoke/config" \
+            --env=XDG_CACHE_HOME="$PWD/.smoke/cache" \
+            in.gxanshu.postcard >launch.log 2>&1
+          code=$?
+          set -e
+          cat launch.log
+          if [ "$code" -ne 124 ]; then
+            echo "::error::expected the app to stay up until timeout killed it (exit 124), got $code"
+            exit 1
+          fi
+          grep -q "could not open the mail cache" launch.log
+          if grep -q "Traceback" launch.log; then
+            echo "::error::the launch logged a Python traceback"
+            exit 1
+          fi
+
+      # Every module meson installs must import from the installed tree: this
+      # is what catches an install_sources entry the host suite cannot see
+      # (host pytest imports from src/, never from /app). The module list is
+      # generated from src/meson.build, so new entries are covered for free.
+      - name: Import every installed module
+        run: |
+          grep -oE "'postcard[^']*\.py'" src/meson.build \
+            | tr -d "'" | sed -E 's|/__init__\.py$||; s|\.py$||; s|/|.|g' \
+            | sort -u > installed-modules.txt
+          cat installed-modules.txt
+          cat > probe-imports.py <<'EOF'
+          import importlib
+          import sys
+
+          names = open(sys.argv[1]).read().split()
+          failures = []
+          for name in names:
+              try:
+                  importlib.import_module(name)
+              except Exception as error:
+                  failures.append(f"{name}: {error!r}")
+          if failures:
+              print("\n".join(failures))
+              sys.exit(1)
+          print(f"imported {len(names)} installed modules")
+          EOF
+          xvfb-run -a flatpak run --filesystem="$PWD" \
+            --command=python3 in.gxanshu.postcard \
+            "$PWD/probe-imports.py" "$PWD/installed-modules.txt"
+
+      # Contract probes without credentials or network: a wrong version, an
+      # unknown op and garbage bytes must each come back as a versioned error
+      # envelope, exit 0. All three short-circuit before either helper could
+      # dial out (version check, then request parsing, both precede dispatch).
+      - name: Probe the installed helper contracts
+        run: |
+          cat > probe-helpers.py <<'EOF'
+          import json
+          import subprocess
+
+          APP_ID = "in.gxanshu.postcard"
+          CASES = [
+              ('{"version": 2, "op": "login"}', "unsupported_version"),
+              ('{"version": 1, "op": "bogus-op"}', "invalid_request"),
+              ("not json at all", "invalid_request"),
+          ]
+
+          def probe(helper, payload):
+              completed = subprocess.run(
+                  ["flatpak", "run", f"--command=/app/bin/{helper}", APP_ID],
+                  input=payload, capture_output=True, text=True, timeout=60,
+              )
+              assert completed.returncode == 0, (helper, payload, completed)
+              reply = json.loads(completed.stdout)
+              assert reply["version"] == 1, (helper, payload, reply)
+              assert reply.get("error", {}).get("code"), (helper, payload, reply)
+              assert "result" not in reply, (helper, payload, reply)
+              return reply["error"]["code"]
+
+          for helper in ("postcard-tuta", "postcard-proton"):
+              for payload, expected in CASES:
+                  code = probe(helper, payload)
+                  assert code == expected, (helper, payload, code)
+                  print(f"{helper}: {payload[:28]:28} -> {code}", flush=True)
+          print("helper contracts: 6/6 error envelopes, no credentials, no network")
+          EOF
+          python3 probe-helpers.py | tee probes.log
+
+      # The compiled-helper contract suites, pointed at the installed
+      # binaries: the same tests the native lanes run against host builds now
+      # run against what actually ships. The sync/send suites ride along to
+      # prove the installed sandbox imports them.
+      - name: Run the installed contract suites
+        run: |
+          set -o pipefail
+          python3 -m pip install --target="$PWD/.flatpak/pytest-libs" -c requirements.txt pytest
+          xvfb-run -a flatpak run --filesystem="$PWD" \
+            --env=PYTHONPATH="$PWD/src:$PWD/.flatpak/pytest-libs" \
+            --env=POSTCARD_TUTA_TEST_BINARY=/app/bin/postcard-tuta \
+            --env=POSTCARD_PROTON_TEST_BINARY=/app/bin/postcard-proton \
+            --command=python3 in.gxanshu.postcard \
+            -m pytest "$PWD/tests/core/net/test_tuta_session.py" \
+              "$PWD/tests/core/net/test_proton_session.py" \
+              "$PWD/tests/test_tuta_sync.py" \
+              "$PWD/tests/test_tuta_send.py" \
+              "$PWD/tests/test_proton_sync.py" \
+              --junitxml="$PWD/smoke-junit.xml" -v 2>&1 | tee smoke-pytest.log
+
+      - name: Collect Flatpak diagnostics
+        if: failure()
+        run: |
+          flatpak info in.gxanshu.postcard > flatpak-info.log 2>&1 || true
+          flatpak list --app >> flatpak-info.log 2>&1 || true
+
+      - name: Upload smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-${{ matrix.arch }}-diagnostics
+          path: |
+            launch.log
+            probes.log
+            smoke-pytest.log
+            smoke-junit.xml
+            installed-modules.txt
+            flatpak-info.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  # The one required check: every lane must report success.
+  gate:
+    needs: [build, test, tuta, proton, a11y, gui, smoke]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate the lane results
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["LANES"])
+          for lane, detail in sorted(needs.items()):
+              print(f"{lane}: {detail['result']}")
+          failed = {
+              lane: detail["result"]
+              for lane, detail in needs.items()
+              if detail["result"] != "success"
+          }
+          if failed:
+              print(f"failing: {failed}", file=sys.stderr)
+              sys.exit(1)
+          print("all lanes green")
+          EOF
+        env:
+          LANES: ${{ toJSON(needs) }}

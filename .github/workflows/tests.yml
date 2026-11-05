@@ -1,7 +1,9 @@
 name: Tests
 
+# No pull_request trigger of its own: pr-gate.yml is the one PR entrypoint and
+# calls this lane, which keeps path filters from deadlocking the required
+# check. Release calls it too, before building anything.
 on:
-  pull_request:
   workflow_call:
   workflow_dispatch:
 
@@ -13,8 +15,14 @@ jobs:
     # Pinned generation, not ubuntu-latest: the 24.04 image ships python3.12,
     # matching the ruff target and pyright language level (asserted below).
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Restore the pip cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
       # NOTE: pytest comes from pip below (pinned), never from apt: two
       # installed copies confuse version-sensitive auditors (pip-licenses
       # reads the apt copy's older "MIT License" string instead of "MIT").

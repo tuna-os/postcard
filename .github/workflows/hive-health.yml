@@ -77,14 +77,20 @@ jobs:
           [ "$count" -eq 1 ] || note "tuta-native.yml uses $count distinct Rust toolchains, expected 1"
           [ -f native/tuta/Cargo.lock ] || note "native/tuta/Cargo.lock is missing (--locked builds would fail)"
 
-          # GNOME runtime: release.yml's container images track the manifest.
+          # GNOME runtime: the reusable build image and release's publish image
+          # track the manifest together, at one digest.
           rt=$(python3 -c "import json; print(json.load(open('in.gxanshu.postcard.json'))['runtime-version'])")
           while read -r img; do
             [ -z "$img" ] || echo "$img" | grep -q "gnome-$rt" \
-              || note "release.yml image $img does not match manifest runtime-version $rt"
-          done < <(grep -oE 'flatpak-github-actions:gnome-[0-9]+' .github/workflows/release.yml | sort -u)
+              || note "builder image $img does not match manifest runtime-version $rt"
+          done < <(grep -ohE 'flatpak-github-actions:gnome-[0-9]+' .github/workflows/release.yml .github/workflows/flatpak-build.yml | sort -u)
           grep -q "org.gnome.Platform//$rt" .github/workflows/release.yml \
             || note "release.yml no longer references org.gnome.Platform//$rt"
+          digests=$(grep -ohE 'flatpak-github-actions:gnome-[0-9]+@sha256:[0-9a-f]+' .github/workflows/release.yml .github/workflows/flatpak-build.yml | sort -u | wc -l)
+          [ "$digests" -eq 1 ] || note "builder image drift: $digests distinct pins across release.yml and flatpak-build.yml"
+          env_digest=$(grep -m1 -oE 'BUILDER_DIGEST: sha256:[0-9a-f]+' .github/workflows/release.yml | grep -oE 'sha256:[0-9a-f]+')
+          grep -q "$env_digest" .github/workflows/flatpak-build.yml \
+            || note "release.yml BUILDER_DIGEST ($env_digest) does not match flatpak-build.yml's image"
 
           # Every third-party action reference stays major-pinned, like the
           # existing files. Local reusable workflows (./...) are versioned

@@ -1,18 +1,21 @@
 name: GUI tests
 
 # The GTK suite only runs where the Adw typelib exists (inside the Flatpak)
-# and where a display exists (under Xvfb), so it gets its own job: build the
-# Flatpak exactly as it ships, then run pytest in the sandbox with the repo
-# exposed and a pure-Python pytest on PYTHONPATH. The sandbox has a private
-# /tmp, so pytest is installed into the repo tree (gitignored), not /tmp.
+# and where a display exists (under Xvfb). PR validation calls this with the
+# bundle the shared build already produced, so the suite runs against what
+# ships without rebuilding it; a manual dispatch with no bundle builds from
+# scratch instead. The sandbox has a private /tmp, so pytest is installed
+# into the repo tree (gitignored), not /tmp. No pull_request trigger of its
+# own: pr-gate.yml is the one PR entrypoint, which keeps path filters from
+# deadlocking the required check.
 on:
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'native/tuta/**'
-      - 'tests/gui/**'
-      - 'in.gxanshu.postcard.json'
-      - '.github/workflows/gui-tests.yml'
+  workflow_call:
+    inputs:
+      app-bundle-artifact:
+        description: "Bundle artifact from flatpak-build.yml to install instead of building. Empty builds from scratch."
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
 
 permissions:
@@ -28,6 +31,7 @@ jobs:
           submodules: recursive
 
       - name: Prepare and verify the pinned SDK
+        if: inputs.app-bundle-artifact == ''
         run: python3 native/tuta/upstream/scripts/sdk-prepare.py
 
       - name: Install Flatpak tooling and Xvfb
@@ -36,14 +40,17 @@ jobs:
           sudo apt-get install -y flatpak flatpak-builder xvfb
 
       # The runtime + SDK download dwarfs the build; the user installation
-      # lives entirely under ~/.local/share/flatpak and is cache-safe.
+      # lives entirely under ~/.local/share/flatpak and is cache-safe. The
+      # arch is part of the key: runtimes are per-arch and a shared key
+      # would poison one arch with the other's binaries.
       - name: Restore the Flatpak runtime cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.local/share/flatpak
-          key: flatpak-${{ hashFiles('in.gxanshu.postcard.json') }}
+          key: flatpak-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('in.gxanshu.postcard.json') }}
 
       - name: Add Flathub and install the runtime + SDK
+        if: inputs.app-bundle-artifact == ''
         run: |
           flatpak remote-add --if-not-exists --user \
             flathub https://flathub.org/repo/flathub.flatpakrepo
@@ -52,16 +59,47 @@ jobs:
 
       # No --disable-updates: a fresh runner has no cloned sources to trust.
       - name: Build and install the Flatpak
+        if: inputs.app-bundle-artifact == ''
         run: |
           flatpak-builder --force-clean --user --install \
             .flatpak/build in.gxanshu.postcard.json
+
+      - name: Install the runtime the manifest asks for
+        if: inputs.app-bundle-artifact != ''
+        run: |
+          flatpak remote-add --if-not-exists --user \
+            flathub https://flathub.org/repo/flathub.flatpakrepo
+          runtime=$(python3 -c "import json; print(json.load(open('in.gxanshu.postcard.json'))['runtime-version'])")
+          flatpak install --user -y flathub "org.gnome.Platform//$runtime"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.app-bundle-artifact != ''
+        with:
+          name: ${{ inputs.app-bundle-artifact }}
+          path: bundle
+
+      - name: Install the bundle
+        if: inputs.app-bundle-artifact != ''
+        run: flatpak install --user -y bundle/*.flatpak
 
       # Installed with pip rather than `just test-gui` so CI needs no `just`.
       # Pinned via the requirements.txt constraints, like `just test-gui`.
       - name: Run the GUI suite inside the sandbox under Xvfb
         run: |
+          set -o pipefail
           python3 -m pip install --target="$PWD/.flatpak/pytest-libs" -c requirements.txt pytest
           xvfb-run -a flatpak run --filesystem="$PWD" \
             --env=PYTHONPATH="$PWD/src:$PWD/.flatpak/pytest-libs" \
             --command=python3 in.gxanshu.postcard \
-            -m pytest "$PWD/tests/gui/" -v
+            -m pytest "$PWD/tests/gui/" --junitxml="$PWD/gui-junit.xml" -v 2>&1 | tee gui-pytest.log
+
+      - name: Upload the GUI report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gui-diagnostics
+          path: |
+            gui-pytest.log
+            gui-junit.xml
+          retention-days: 7
+          if-no-files-found: warn
