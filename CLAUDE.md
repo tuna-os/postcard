@@ -10,6 +10,7 @@ Everything goes through the Flatpak toolchain via [`just`](justfile) — there i
 
 ```bash
 just init      # one-time: add Flathub, install the GNOME 51 runtime + SDK
+just prepare   # check out submodules, prepare the pinned Tuta SDK (idempotent)
 just build     # build the Flatpak from the working tree, install --user
 just run       # build, then launch (the normal dev loop)
 just run-debug # run with G_MESSAGES_DEBUG=all
@@ -21,6 +22,8 @@ just lint      # flatpak-builder-lint on the manifest
 ```
 
 Requires `flatpak` + `flatpak-builder` on the host; Python/GTK/meson come from the GNOME SDK. `just build` passes `--disable-updates` to reuse already-cloned sources (e.g. blueprint-compiler) — drop it if you bump a source's tag/commit in `in.gxanshu.postcard.json`.
+
+A fresh clone builds with no extra steps: `build` and `bundle` both depend on `prepare` (`run`, `inspect`, `test-gui` inherit it via `build`), which runs `git submodule update --init --recursive` and then `sdk-prepare.py`. The script verifies the `native/tuta/upstream/sdk/generated/` tree first and returns early when it is current, so `prepare` is a fast no-op on repeat runs.
 
 ## Lint, format, tests
 

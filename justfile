@@ -6,6 +6,9 @@
 #   just build               build the Flatpak from your working tree
 #   just run                 build, then launch it in the Flatpak sandbox
 #
+# `build` and `bundle` run `prepare` first (submodules + the pinned Tuta SDK),
+# so a fresh clone builds with no extra steps.
+#
 # The Flatpak build compiles your CURRENT working tree (uncommitted edits
 # included) — the manifest uses a "dir" source, so no need to commit first.
 #
@@ -57,10 +60,18 @@ init:
 # Build & run (Flatpak)
 # ----------------------------------------------------------------------------
 
+# Check out submodules and prepare the pinned Tuta SDK the Flatpak build needs.
+# Idempotent: the submodule update is a no-op when already checked out, and
+# sdk-prepare.py verifies the generated tree first, re-preparing only when it
+# is missing or stale — so a re-run is fast. `build` and `bundle` run this.
+prepare:
+    git submodule update --init --recursive
+    python3 native/tuta/upstream/scripts/sdk-prepare.py
+
 # Build Postcard as a Flatpak from your working tree and install it for your user.
 # --disable-updates: trust already-cloned sources (e.g. blueprint-compiler) instead
 # of re-fetching from upstream on every build. Drop it if you bump a source's tag/commit.
-build: test
+build: prepare test
     flatpak-builder --force-clean --user --install --disable-updates \
         "{{fp-builddir}}" "{{manifest}}"
 
@@ -81,7 +92,7 @@ inspect: build
 # ----------------------------------------------------------------------------
 
 # Build, export to a local repo, and produce a single-file .flatpak bundle.
-bundle: test
+bundle: prepare test
     flatpak-builder --force-clean --disable-updates --repo="{{fp-repo}}" \
         "{{fp-builddir}}" "{{manifest}}"
     flatpak build-bundle "{{fp-repo}}" "{{bundle}}" "{{app-id}}"
