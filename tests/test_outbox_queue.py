@@ -9,7 +9,12 @@ own copy in Sent before touching SMTP, so the mail goes out exactly once.
 import pytest
 
 import postcard.mail_sync as mail_sync
-from postcard.core.models.account import Account
+from postcard.core.models.account import (
+    PROTOCOL_TUTA,
+    TUTA_HOST,
+    TUTA_PORT,
+    Account,
+)
 from postcard.core.net.auth import Credential
 from postcard.core.net.imap_session import ImapError, MailboxInfo
 from postcard.core.net.proton_session import ProtonError
@@ -98,6 +103,26 @@ class FakeImapSession:
             raise type(self).fail_append_with
         type(self).appends.append((mailbox, raw))
         return type(self).appenduid
+
+
+class FakeTutaSession:
+    """The Tuta helper: counts submits, files the Sent copy itself."""
+
+    submits: list[dict] = []
+
+    def __init__(self, credential):
+        pass
+
+    def request(self, operation, **kwargs):
+        assert operation == "send"
+        type(self).submits.append(kwargs)
+        return {
+            "message_id": "server-message-1",
+            "sent_date_ms": 0,
+            "sent_mail": "lists/sent",
+            "internal_recipients": 1,
+            "external_recipients": 2,
+        }
 
 
 class FakeGraphSession:
@@ -194,6 +219,18 @@ def _account(**overrides):
     return Account(**fields)
 
 
+def _tuta_account_row(database):
+    return database.save_account(
+        "ada@tuta.com",
+        "Ada",
+        TUTA_HOST,
+        TUTA_PORT,
+        TUTA_HOST,
+        TUTA_PORT,
+        protocol=PROTOCOL_TUTA,
+    )
+
+
 # --- claims ------------------------------------------------------------------
 
 
@@ -215,6 +252,62 @@ def test_recovery_spares_a_live_claim(stored):
 
     assert mail_sync.recover_queued_sends(database) == 1
     assert database.queued_send(mail.id).state is OutboxState.READY
+
+
+def test_recovery_fails_an_interrupted_tuta_send_closed(stored):
+    # A Tuta row left sending by a crash can never prove whether its mail
+    # went out -- the server assigns its own Message-ID, so no Sent lookup
+    # can match it. Recovery fails it closed with the send_uncertain
+    # wording, exactly as the live path does when the helper reports the
+    # submit ambiguous: a human checks Sent, never an automatic retry.
+    database, _imap_account = stored
+    tuta = _tuta_account_row(database)
+    outbox, mail, _job = _queued(database, tuta.id)
+    mail_sync._live_claims.clear()
+
+    assert mail_sync.recover_queued_sends(database) == 1
+
+    settled = database.queued_send(mail.id)
+    assert settled.state is OutboxState.FAILED
+    assert settled.last_error == str(TutaError("send_uncertain"))
+    assert mail_sync.claim_queued_send(database, mail.id) is None
+    assert database.pending_outbox_sends(outbox.id) == []
+
+
+def test_recovery_spares_a_live_tuta_claim(stored):
+    database, _imap_account = stored
+    tuta = _tuta_account_row(database)
+    _outbox, mail, _job = _queued(database, tuta.id)
+
+    assert mail_sync.recover_queued_sends(database) == 0
+    assert database.queued_send(mail.id).state is OutboxState.SENDING
+
+    mail_sync.release_queued_send(mail.id)
+
+    assert mail_sync.recover_queued_sends(database) == 1
+    assert database.queued_send(mail.id).state is OutboxState.FAILED
+
+
+def test_recovery_readies_smtp_but_fails_tuta(stored):
+    database, imap_account = stored
+    tuta = _tuta_account_row(database)
+    _outbox, smtp_mail, _first = _queued(database, imap_account.id)
+    _outbox, tuta_mail, _second = _queued(database, tuta.id)
+    mail_sync._live_claims.clear()
+
+    assert mail_sync.recover_queued_sends(database) == 2
+
+    assert database.queued_send(smtp_mail.id).state is OutboxState.READY
+    assert database.queued_send(tuta_mail.id).state is OutboxState.FAILED
+
+
+def test_claim_leaves_synchronous_at_normal(stored):
+    # The claim commits durably, then hands the connection back as it found
+    # it: a stuck FULL would fsync every later write on this connection.
+    database, account = stored
+    _outbox, _mail, _job = _queued(database, account.id)
+
+    assert database._conn.execute("PRAGMA synchronous").fetchone()[0] == 1
 
 
 def test_failures_retry_until_the_cap_then_rest_failed(stored):
@@ -318,6 +411,32 @@ def test_a_crash_between_send_and_filing_sends_exactly_once(stored, servers):
     assert database.emails_in_folder(outbox.id) == []
     [copy] = database.emails_in_folder(sent.id)
     assert (copy.subject, copy.server_id) == ("Hi", "7")
+
+
+def test_a_crash_between_tuta_submit_and_filing_never_resends(stored, monkeypatch):
+    # Claim, server-accept, then die before filing: the row stays sending
+    # with no witness. Recovery must fail it closed -- the Sent check that
+    # guards the SMTP retry above cannot see a Tuta copy, so a retry would
+    # send it a second time. The submit count is the assertion that matters.
+    database, _imap_account = stored
+    tuta = _tuta_account_row(database)
+    FakeTutaSession.submits = []
+    monkeypatch.setattr(mail_sync, "TutaSession", FakeTutaSession)
+    outbox, mail, job = _queued(database, tuta.id)
+
+    outcome = mail_sync.send_queued(
+        _account(protocol="tuta", email="ada@tuta.com"), CREDENTIAL, job
+    )
+    assert outcome.filed_uid == "lists/sent"
+    # ... the process dies here: no filing, no complete, no release ...
+    mail_sync._live_claims.clear()
+
+    assert mail_sync.recover_queued_sends(database) == 1
+    assert database.queued_send(mail.id).state is OutboxState.FAILED
+    # ... a fresh boot's drain finds nothing to retry ...
+    assert database.pending_outbox_sends(outbox.id) == []
+    assert mail_sync.claim_queued_send(database, mail.id) is None
+    assert len(FakeTutaSession.submits) == 1
 
 
 def test_a_failed_redelivery_check_fails_the_attempt_instead_of_sending(
