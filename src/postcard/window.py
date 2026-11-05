@@ -41,7 +41,7 @@ from .core.models.email import Email
 from .core.models.folder import Folder
 from .core.net import errors, imap_session, smtp_session
 from .core.net.tuta_session import TutaError
-from .core.store.database import Database, OutboxState, QueuedSend
+from .core.store.database import CacheError, Database, OutboxState, QueuedSend
 from .folder_row import FolderRow
 from .message_view import LoadCallback, MessageView
 from .provider_dialog import PostcardProviderDialog
@@ -89,6 +89,18 @@ CLOCK_KEY = "clock-format"
 
 # xdg-desktop-portal's limit for a notification icon, which must also be square.
 MAX_NOTIFY_ICON_PX = 512
+
+# The locked page of main_stack. The other page names live in window_types;
+# this one stays here because that module is frozen for this change.
+PAGE_LOCKED = "locked"
+
+# Who reports session lock and suspend (KeePassXC model, ADR 0001 section 7):
+# the screensaver on the session bus, logind on the system bus.
+SCREENSAVER_NAME = "org.gnome.ScreenSaver"
+SCREENSAVER_PATH = "/org/gnome/ScreenSaver"
+LOGIN1_NAME = "org.freedesktop.login1"
+LOGIN1_PATH = "/org/freedesktop/login1"
+LOGIN1_INTERFACE = "org.freedesktop.login1.Manager"
 
 # Move is the one action carrying a parameter (the destination folder name), so
 # it is registered on its own wherever these are.
@@ -145,6 +157,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     thread_box: Gtk.Box = Gtk.Template.Child()
     main_stack: Gtk.Stack = Gtk.Template.Child()
     add_account_button: Gtk.Button = Gtk.Template.Child()
+    unlock_button: Gtk.Button = Gtk.Template.Child()
     refresh_button: Gtk.Button = Gtk.Template.Child()
     search_bar: Gtk.SearchBar = Gtk.Template.Child()
     search_entry: Gtk.SearchEntry = Gtk.Template.Child()
@@ -230,11 +243,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._connect_widgets()
 
         self.connection_banner.connect("button-clicked", self._on_banner_retry)
-        self._network = Gio.NetworkMonitor.get_default()
-        self._is_online = self._network.get_network_available()
-        self._network_handler = self._network.connect(
-            "network-changed", self._on_network_changed
-        )
+        self._watch_network()
 
         self._avatars = AvatarLoader(self._settings)
         self._avatar_handler = self._settings.connect(
@@ -263,6 +272,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._lifecycle = Lifecycle()
         mail_sync.register_lifecycle(self._lifecycle)
         self._sync_timer_id = 0
+        self._init_lock_state()
 
         self.connect("close-request", self._on_close_request)
         if not self._is_online:
@@ -284,6 +294,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
 
     def _connect_widgets(self) -> None:
         self.add_account_button.connect("clicked", self._on_add_account_clicked)
+        self.unlock_button.connect("clicked", self._on_unlock_clicked)
         self.refresh_button.connect("clicked", self._on_refresh_clicked)
         self.compose_button.connect("clicked", self._on_compose_clicked)
         self.reply_all_button.connect("clicked", self._on_reply_all_clicked)
@@ -301,6 +312,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # Presenting the window again after _on_close_request released the
         # reading pane re-renders whatever is still selected.
         self.connect("map", self._on_map)
+        # The backstop under the unlock signals: focus means a human is back.
+        self.connect("notify::is-active", self._on_window_active_changed)
 
     # Everything the mail view runs on. Built once, before we know
     # whether there are any accounts to put in it.
@@ -380,6 +393,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # Show the mail view over every account at once. Runs once per window, or
     # again when the first account is added to an empty database.
     def _load_mail_view(self) -> None:
+        # An account added while locked waits for the unlock, which loads the
+        # mail view itself once the cache is open again.
+        if self._is_locked:
+            return
         self.reader_stack.set_visible_child_name(PAGE_EMPTY)
         self.main_stack.set_visible_child_name(PAGE_MAIL)
 
@@ -537,6 +554,12 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             Gio.bus_get_sync(Gio.BusType.SESSION).signal_unsubscribe(
                 self._clock_subscription
             )
+        if self._screensaver_watch:
+            Gio.bus_get_sync(Gio.BusType.SESSION).signal_unsubscribe(
+                self._screensaver_watch
+            )
+        if self._login_watch:
+            Gio.bus_get_sync(Gio.BusType.SYSTEM).signal_unsubscribe(self._login_watch)
         self._avatars.shutdown()
         if self._sync_timer_id:
             GLib.source_remove(self._sync_timer_id)
@@ -553,6 +576,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # open path marks it read.
     def open_email(self, folder_id: int, uid: str) -> None:
         if self._account is None:
+            return
+        # A notification clicked while locked only presents the locked page;
+        # the focus that brings unlocks, and the mail is a click away.
+        if self._is_locked:
             return
         # All Inboxes already shows it; switching would drop the user out of
         # the unified view to open mail that was on screen either way.
@@ -579,6 +606,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # --- accounts, and opening the composer -------------------------------
 
     def _on_manage_accounts(self, *_args: object) -> None:
+        if self._is_locked:
+            return
         dialog = PostcardAccountsDialog(self._db)
         dialog.connect("closed", lambda *_: self.reload_accounts())
         dialog.present(self)
@@ -586,6 +615,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # Re-read accounts after they change (add/remove). _reload_folders picks a
     # new folder if the open one went with a deleted account.
     def reload_accounts(self) -> None:
+        # The unlock re-reads the accounts itself.
+        if self._is_locked:
+            return
         if not self._db.accounts():
             self._accounts = {}
             self._account = None
@@ -612,6 +644,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._on_online_names, names)
 
     def _on_online_names(self, names: dict[str, str]) -> bool:
+        if self._is_locked:
+            self._defer(self._on_online_names, names)
+            return False
         if self._lifecycle.is_shutdown:
             return False
         for account in self._accounts.values():
@@ -623,11 +658,16 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         return False
 
     def _on_add_account_clicked(self, *_args: object) -> None:
+        if self._is_locked:
+            return
         dialog = PostcardProviderDialog(self._db)
         dialog.connect("account-added", self._on_account_added)
         dialog.present(self)
 
     def _on_account_added(self, _dialog: Adw.Dialog) -> None:
+        # The unlock's reload picks the account up.
+        if self._is_locked:
+            return
         # The first account has no mail view yet; a later one only adds a branch
         # to the sidebar, so the open folder is left alone.
         if self._current_folder is None:
@@ -713,6 +753,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         account = account or self._account
         if account is None:
             return
+        if self._is_locked:
+            return
         composer = composer_for_mailto(
             self.get_application(), self._db, account, self._settings, uri
         )
@@ -729,6 +771,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     ) -> None:
         account = account or self._account
         if account is None:
+            return
+        if self._is_locked:
             return
         composer = PostcardComposerWindow(
             self.get_application(),
@@ -776,6 +820,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _on_composer_finished(
         self, _composer: PostcardComposerWindow, failure: str
     ) -> None:
+        # The unlock's reload and sync cover whatever the composer queued; the
+        # composer shows its own send errors.
+        if self._is_locked:
+            return
         if failure:
             self._toast(failure)
         selected = self._selected_conversation()
@@ -846,6 +894,11 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # there is nothing selected rather than an error. Every mail action
         # funnels through here, which is why the guard belongs here.
         if self._account is None:
+            return []
+        # Locked reads as unselected too: every toggle, move, reply, forward,
+        # unsubscribe and draft edit then no-ops instead of touching the
+        # closed cache.
+        if self._is_locked:
             return []
         # Ask the selection which positions are set rather than asking every
         # position whether it is selected: this runs several times per
@@ -1045,6 +1098,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _on_flag_sign_in_failed(
         self, revert: Callable[[], None], token: JobToken
     ) -> bool:
+        if self._is_locked:
+            self._defer(self._on_flag_sign_in_failed, revert, token)
+            return False
         if not self._lifecycle.is_live(token):
             return False
         # The row was already updated optimistically, so leaving it would show a
@@ -1060,6 +1116,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         error: Exception,
         token: JobToken,
     ) -> bool:
+        if self._is_locked:
+            self._defer(self._on_action_failed, revert, host, error, token)
+            return False
         if not self._lifecycle.is_live(token):
             return False
         revert()
@@ -1357,6 +1416,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._pending_move_timeout = GLib.timeout_add(
             MOVE_UNDO_MS, self._on_move_timeout
         )
+        self._move_deadline = time.monotonic() + MOVE_UNDO_MS / 1000
         self.toast_overlay.add_toast(toast)
 
     def _clear_pending_moves(self) -> list[tuple[PendingMove, JobToken]]:
@@ -1365,9 +1425,13 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             self._pending_move_timeout = 0
         moves, self._pending_moves = self._pending_moves, []
         self._pending_toast = None
+        self._move_deadline = 0.0
+        self._move_resume_ms = 0
         return moves
 
     def _on_undo_move(self, _toast: Adw.Toast) -> None:
+        if self._is_locked:
+            return
         for pending, _token in self._clear_pending_moves():
             self._restore_move(pending)
 
@@ -1473,6 +1537,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _on_move_result(
         self, pending: PendingMove, token: JobToken, result: mail_sync.MoveResult
     ) -> bool:
+        if self._is_locked:
+            self._defer(self._on_move_result, pending, token, result)
+            return False
         if not self._lifecycle.is_live(token):
             self._clear_move_tombstones(pending)
             return False
@@ -1512,6 +1579,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         return False
 
     def _on_move_sign_in_failed(self, pending: PendingMove, token: JobToken) -> bool:
+        if self._is_locked:
+            self._defer(self._on_move_sign_in_failed, pending, token)
+            return False
         if not self._lifecycle.is_live(token):
             self._clear_move_tombstones(pending)
             return False
@@ -1523,6 +1593,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _on_move_failed(
         self, pending: PendingMove, host: str, error: Exception, token: JobToken
     ) -> bool:
+        if self._is_locked:
+            self._defer(self._on_move_failed, pending, host, error, token)
+            return False
         if not self._lifecycle.is_live(token):
             self._clear_move_tombstones(pending)
             return False
@@ -1766,6 +1839,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # their nesting actually changed. A plain badge/icon update refreshes the
     # rows in place.
     def _reload_folders(self) -> None:
+        # The unlock calls this itself once the cache is open again.
+        if self._is_locked:
+            return
         accounts = self._db.accounts()
         self._accounts = {account.id: account for account in accounts}
         folders = [
@@ -1796,14 +1872,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # folder id has to go when the folder does -- otherwise a new account
         # inherits the old one's badge, cooldown and paging state.
         live_ids = {folder.id for folder in folders} | {ALL_INBOXES_ID}
-        for cache in (
-            self._loaded_counts,
-            self._folders_with_more_mail,
-            self._folder_sync_times,
-            self._remote_unread_counts,
-        ):
-            for folder_id in set(cache) - live_ids:
-                del cache[folder_id]
+        self._drop_stale_folder_caches(live_ids)
 
         # Nothing is selected on a first run, or after the open folder was
         # pruned along with its account. An account row can't stand in: it is
@@ -1824,6 +1893,16 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._push_tray_unread(folders)
         # Every path that adds or removes an account ends up here.
         self._watch_inboxes()
+
+    def _drop_stale_folder_caches(self, live_ids: set[int]) -> None:
+        for cache in (
+            self._loaded_counts,
+            self._folders_with_more_mail,
+            self._folder_sync_times,
+            self._remote_unread_counts,
+        ):
+            for folder_id in set(cache) - live_ids:
+                del cache[folder_id]
 
     def _push_tray_unread(self, folders: list[Folder]) -> None:
         app = cast("PostcardApplication | None", self.get_application())
@@ -1878,6 +1957,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # action can refresh without reloading the reader.
     def _refresh_conversations(self, keep_id: int | None = None) -> None:
         if self._current_folder is None:
+            return
+        # The list on screen is left as it was; the unlock replays whatever
+        # landed while locked, which refreshes as usual.
+        if self._is_locked:
             return
 
         vadjustment = self.conversation_scroller.get_vadjustment()
@@ -2048,6 +2131,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _load_more_conversations(self) -> bool:
         if not self._list_has_more or self._current_folder is None:
             return False
+        if self._is_locked:
+            return False
         folder_ids = [folder.id for folder in self._view_folders()]
         query = self.search_entry.get_text().strip()
         unread_only = self.unread_button.get_active()
@@ -2212,6 +2297,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # there is nothing to read before then.
         if self._account is None:
             return
+        # The reader keeps whatever it was showing; it is behind the locked
+        # page either way.
+        if self._is_locked:
+            return
         selected = self._selected_conversations()
         self._update_unsubscribe_action()
         if len(selected) != 1:
@@ -2356,6 +2445,11 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # we have it, else pull it over IMAP on a worker thread. (Marking read is
     # handled once per conversation in _update_reader.)
     def _load_body(self, mail: Email, callback: LoadCallback) -> None:
+        # Unreachable while locked -- no view is built there -- but a dropped
+        # callback would leave its view spinning with nothing to heal it.
+        if self._is_locked:
+            callback(None, _("Postcard is locked."))
+            return
         cached = self._db.get_raw_message(mail.id)
         if cached is not None:
             callback(cached, None)
@@ -2438,6 +2532,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         error: str | None,
         token: JobToken,
     ) -> bool:
+        if self._is_locked:
+            self._defer(self._deliver_body, callback, email_id, raw, error, token)
+            return False
         # A body for a pruned folder would land on whatever row reused the id.
         if not self._lifecycle.is_live(token):
             return False
@@ -2533,6 +2630,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _on_attachment_spooled(
         self, path: str | None, filename: str, token: JobToken | None
     ) -> bool:
+        # The viewer it launches must not open under the lock screen.
+        if self._is_locked:
+            self._defer(self._on_attachment_spooled, path, filename, token)
+            return False
         if token is not None and not self._lifecycle.is_live(token):
             return False
         if path is None:
@@ -2634,6 +2735,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # Not errors.classify(): it is for IMAP/SMTP and HTTPError
     # subclasses OSError, so it would answer "couldn't reach the mail server".
     def _on_unsubscribed(self, is_done: bool) -> bool:
+        if self._is_locked:
+            self._defer(self._on_unsubscribed, is_done)
+            return False
         if self._lifecycle.is_shutdown:
             return False
         if not is_done:
@@ -2646,6 +2750,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
 
     def _drain_outbox(self, account: Account) -> None:
         if self._lifecycle.is_shutdown:
+            return
+        # The unlock's sync drains; a drain started here could not file.
+        if self._is_locked:
             return
         # Sending into nothing only burns attempts: the mail stays queued, and
         # the return of the network drains it.
@@ -2747,6 +2854,11 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _on_outbox_drained(
         self, account: Account, token: JobToken, results: list[OutboxResult]
     ) -> bool:
+        # Deferred, never dropped: a send the worker finished must be filed
+        # exactly once, and dropping it would queue it to go out twice.
+        if self._is_locked:
+            self._defer(self._on_outbox_drained, account, token, results)
+            return False
         self._draining_account_ids.discard(account.id)
         for result in results:
             mail_sync.release_queued_send(result.email_id)
@@ -2893,6 +3005,9 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     ) -> None:
         if self._lifecycle.is_shutdown:
             return
+        # The unlock syncs; a sync started here could not file.
+        if self._is_locked:
+            return
         # Don't pile background syncs (folder clicks, the poll timer) on top of
         # one already running for the same account.
         if in_background and account.id in self._syncing_account_ids:
@@ -2914,6 +3029,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # ponytail: one thread per account at once, which is fine for a handful --
     # queue them if someone turns up with twenty.
     def _sync_all(self, in_background: bool = False) -> None:
+        if self._is_locked:
+            return
         open_names = {folder.account_id: folder.name for folder in self._view_folders()}
         for account in self._accounts.values():
             self._drain_outbox(account)
@@ -2932,6 +3049,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             )
 
     def _on_sync_tick(self) -> bool:
+        # The timer keeps running so there is nothing to reschedule; it only
+        # skips its work until the unlock syncs.
+        if self._is_locked:
+            return True
         if self._accounts and self._is_online:
             self._sync_all(in_background=True)
         return True
@@ -2950,6 +3071,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # Synced as the inbox whatever folder is open, since that is where the
     # change is; the list on screen refreshes from the database either way.
     def _on_inbox_changed(self, account_id: int) -> bool:
+        # A watcher stopping as the lock lands can still have one queued.
+        if self._is_locked:
+            self._defer(self._on_inbox_changed, account_id)
+            return False
         if self._lifecycle.is_shutdown:
             return False
         account = self._accounts.get(account_id)
@@ -3006,6 +3131,12 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _on_sync_done(
         self, account: Account, token: JobToken, result: mail_sync.SyncResult
     ) -> bool:
+        # Filed on unlock, ahead of its sync, so mail fetched just before the
+        # lock lands instead of waiting a round trip.
+        if self._is_locked:
+            self._defer(self._on_sync_done, account, token, result)
+            self._set_syncing(account.id, False)
+            return False
         # Before the liveness check: a dropped callback still has to release
         # the spinner and the Refresh button.
         self._set_syncing(account.id, False)
@@ -3248,6 +3379,12 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         is_auth_failure: bool,
         message: str,
     ) -> bool:
+        # Held for the unlock so the failure banner never lands on the locked
+        # page, where only the account address would show.
+        if self._is_locked:
+            self._defer(self._on_sync_error, account, token, is_auth_failure, message)
+            self._set_syncing(account.id, False)
+            return False
         self._set_syncing(account.id, False)
         if self._lifecycle.is_shutdown:
             return False
@@ -3296,6 +3433,13 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         if self._accounts:
             self._sync_all()
 
+    def _watch_network(self) -> None:
+        self._network = Gio.NetworkMonitor.get_default()
+        self._is_online = self._network.get_network_available()
+        self._network_handler = self._network.connect(
+            "network-changed", self._on_network_changed
+        )
+
     # network-changed fires on any change; act only on real online/offline flips.
     def _on_network_changed(
         self, _monitor: Gio.NetworkMonitor, is_available: bool
@@ -3303,6 +3447,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         if is_available == self._is_online:
             return
         self._is_online = is_available
+        # Only the flag flips while locked: the unlock restarts the watchers
+        # and syncs, and no banner belongs on the locked page.
+        if self._is_locked:
+            return
         if not is_available:
             # The pooled connections are on sockets that are already gone, but
             # nothing says so until a command times out on one.
@@ -3355,3 +3503,184 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             folder.account_id in self._syncing_account_ids
             for folder in self._view_folders()
         )
+
+    # --- locking on session lock and suspend --------------------------------
+
+    # KeePassXC model, ADR 0001 section 7: when the session locks or the
+    # machine suspends, drop the connections, close the mail cache, and blank
+    # the window, so no mail shows in lock-screen thumbnails or the app grid.
+    # Unlock is automatic on activity and explicitly not a cryptographic
+    # boundary -- the session owner can always read their own files.
+    def _init_lock_state(self) -> None:
+        # While locked the database is closed, so completions landing there
+        # wait in _deferred_completions for the unlock to replay them, and
+        # every entry point that starts work or reads the cache returns early
+        # instead.
+        self._is_locked = False
+        self._screensaver_active = False
+        self._deferred_completions: list[
+            tuple[Callable[..., bool], tuple[object, ...]]
+        ] = []
+        self._screensaver_watch = 0
+        self._login_watch = 0
+        # The undo window's deadline, so a lock can pause its timer and the
+        # unlock resume it with the remaining time.
+        self._move_deadline = 0.0
+        self._move_resume_ms = 0
+        self._watch_session_lock()
+
+    def _watch_session_lock(self) -> None:
+        try:
+            session_bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        except GLib.Error:
+            logger.info("no session bus; the window will not lock with it")
+        else:
+            self._screensaver_watch = session_bus.signal_subscribe(
+                SCREENSAVER_NAME,
+                SCREENSAVER_NAME,
+                "ActiveChanged",
+                SCREENSAVER_PATH,
+                None,
+                Gio.DBusSignalFlags.NONE,
+                self._on_screensaver_active_changed,
+                None,
+            )
+        try:
+            system_bus = Gio.bus_get_sync(Gio.BusType.SYSTEM)
+        except GLib.Error:
+            logger.info("no system bus; suspend will not lock the window")
+            return
+        self._login_watch = system_bus.signal_subscribe(
+            LOGIN1_NAME,
+            LOGIN1_INTERFACE,
+            "PrepareForSleep",
+            LOGIN1_PATH,
+            None,
+            Gio.DBusSignalFlags.NONE,
+            self._on_prepare_for_sleep,
+            None,
+        )
+
+    def _on_screensaver_active_changed(
+        self,
+        _bus: Gio.DBusConnection,
+        _sender: str | None,
+        _path: str,
+        _interface: str,
+        _signal: str,
+        parameters: GLib.Variant,
+        _data: object,
+    ) -> None:
+        (active,) = parameters.unpack()
+        self._screensaver_active = active
+        if active:
+            self._lock_app()
+        else:
+            self._unlock_app()
+
+    def _on_prepare_for_sleep(
+        self,
+        _bus: Gio.DBusConnection,
+        _sender: str | None,
+        _path: str,
+        _interface: str,
+        _signal: str,
+        parameters: GLib.Variant,
+        _data: object,
+    ) -> None:
+        (starting,) = parameters.unpack()
+        if starting:
+            self._lock_app()
+        elif not self._screensaver_active:
+            # Resumed with no lock screen (lock on suspend is off): the
+            # session is already interactive. Otherwise the unlock signal
+            # still to come unlocks.
+            self._unlock_app()
+
+    def _on_window_active_changed(
+        self, _window: Gtk.Window, _pspec: GObject.ParamSpec
+    ) -> None:
+        # The backstop under the unlock signals: a missed one must never leave
+        # the window stuck locked, and focus means a human is back.
+        if self._is_locked and self.is_active():
+            self._unlock_app()
+
+    def _on_unlock_clicked(self, *_args: object) -> None:
+        self._unlock_app()
+
+    def _lock_app(self) -> None:
+        if self._is_locked:
+            return
+        self._is_locked = True
+        # Blank first: everything below is local and fast, but the locked page
+        # is what a thumbnail taken mid-lock must catch.
+        self.main_stack.set_visible_child_name(PAGE_LOCKED)
+        logger.info("session locked; hiding mail and dropping connections")
+        mail_sync.close_sessions()
+        self._db.close()
+        # The undo window pauses with the timer: committing a move while the
+        # cache is closed could neither reconcile nor restore it.
+        if self._pending_move_timeout:
+            GLib.source_remove(self._pending_move_timeout)
+            self._pending_move_timeout = 0
+            self._move_resume_ms = max(
+                1, int((self._move_deadline - time.monotonic()) * 1000)
+            )
+        if self._pending_toast is not None:
+            self._pending_toast.dismiss()
+            self._pending_toast = None
+        self.connection_banner.set_revealed(False)
+
+    def _unlock_app(self) -> None:
+        if not self._is_locked:
+            return
+        try:
+            self._reopen_cache()
+        except CacheError as error:
+            # Stays locked: the next unlock signal retries, and so does the
+            # Unlock button, which is why the locked page keeps one.
+            logger.warning("could not reopen the mail cache: %s", error.code)
+            self._toast(_("Could not reopen the mail cache."))
+            return
+        self._is_locked = False
+        # First, in landing order: completions release the busy state this
+        # sync would otherwise mistake for work still running.
+        deferred, self._deferred_completions = self._deferred_completions, []
+        for callback, args in deferred:
+            callback(*args)
+        if self._move_resume_ms:
+            self._pending_move_timeout = GLib.timeout_add(
+                self._move_resume_ms, self._on_move_timeout
+            )
+            self._move_deadline = time.monotonic() + self._move_resume_ms / 1000
+            self._move_resume_ms = 0
+        if not self._db.accounts():
+            self.main_stack.set_visible_child_name(PAGE_NO_ACCOUNT)
+            return
+        self._show_sync_failures()
+        if not self._sync_failures and not self._is_online:
+            self._show_offline_banner()
+        if self._account is None:
+            # The first account arrived while locked; there is no mail view
+            # yet to reload.
+            self._load_mail_view()
+            return
+        self.main_stack.set_visible_child_name(PAGE_MAIL)
+        self._reload_folders()
+        if self._is_online:
+            self._sync_all(in_background=True)
+
+    def _reopen_cache(self) -> None:
+        """Re-open the mail cache in place, through the normal keyring path.
+
+        The Database object is shared -- the application, every window, and
+        every composer hold the same one -- so re-initializing it heals every
+        holder at once, including the deferred completions' bound setters.
+        Raises CacheError exactly like the first open when the keyring gives
+        nothing usable.
+        """
+        self._db.__init__(key=secrets.database_key())
+
+    def _defer(self, callback: Callable[..., bool], *args: object) -> None:
+        """Hold one completion for the unlock to replay, in landing order."""
+        self._deferred_completions.append((callback, args))
