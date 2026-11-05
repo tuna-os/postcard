@@ -132,12 +132,16 @@ Postcard starts with no window, gets new mail the moment it lands, and notifies 
 Postcard builds and runs entirely as a Flatpak, the same way it ships. There is no host-level `python app.py`. Everything goes through [`just`](https://github.com/casey/just)
 
 ```bash
+git clone --recurse-submodules https://github.com/tuna-os/postcard.git
+cd postcard
 just init # one-time: add Flathub, install the GNOME runtime + SDK
 just build # build from the working tree, install for --user
 just run # build, then launch (the normal dev loop)
 ```
 
 You only need `flatpak` and `flatpak-builder` on the host. Python, GTK and everything else come from the GNOME SDK.
+
+Cloned without `--recurse-submodules`? No problem: `just build` runs `just prepare` first, which checks out the submodules and prepares the pinned Tuta SDK the Flatpak build needs. It is idempotent, a fast no-op once everything is prepared, so you can also run it by hand any time.
 
 For the curious: the UI is GTK 4 and libadwaita with Blueprint (`.blp`) files, HTML mail is rendered with WebKitGTK, search uses SQLite FTS5, networking is done with the Python standard library (`imaplib` and `smtplib`), and credentials go through libsecret.
 
