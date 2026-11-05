@@ -152,7 +152,8 @@ def _token_request(
     if not client_id:
         raise MsOAuthError("invalid_request")
     body = urllib.parse.urlencode({"client_id": client_id} | fields).encode()
-    request = urllib.request.Request(
+    # S310: a constant https token endpoint, never caller input.
+    request = urllib.request.Request(  # noqa: S310
         f"{MS_AUTHORITY}/oauth2/v2.0/token",
         data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"},

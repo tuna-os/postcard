@@ -52,7 +52,9 @@ def helper_transport(request: dict) -> dict:
     if executable is None:
         raise TutaError("helper_missing")
     try:
-        response = subprocess.run(
+        # S603: fixed argv (a PATH-resolved helper path), no shell -- the
+        # request goes over stdin as JSON, so nothing reaches a command line.
+        response = subprocess.run(  # noqa: S603
             [executable],
             input=json.dumps(request),
             text=True,

@@ -21,7 +21,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
-from . import NET_TIMEOUT_SECONDS
+from . import NET_TIMEOUT_SECONDS, https_context
 from .auth import MECHANISM_LOGIN, MECHANISM_XOAUTH2, Credential
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,12 @@ def urlopen_transport(request: urllib.request.Request) -> Response:
     """Send a request for real. An HTTP error status is returned, not raised,
     so retrying and error parsing live in one place."""
     try:
-        with urllib.request.urlopen(request, timeout=NET_TIMEOUT_SECONDS) as reply:
+        # S310: every URL is https-only (discovery pins them to the session's
+        # https origin, and each caller rechecks), and the context verifies
+        # rather than trusting the ambient default.
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=NET_TIMEOUT_SECONDS, context=https_context()
+        ) as reply:
             return Response(reply.status, reply.read(), dict(reply.headers))
     except urllib.error.HTTPError as error:
         return Response(error.code, error.read(), dict(error.headers))
@@ -208,7 +213,8 @@ def discover(
         ) from None
     if session_origin[0] != "https":
         raise JmapError(0, CODE_BAD_SESSION, "the JMAP session URL must use https")
-    request = urllib.request.Request(
+    # S310: https-only, refused unless https above.
+    request = urllib.request.Request(  # noqa: S310
         session_url,
         headers={
             "Authorization": _auth_header(credential),
@@ -412,6 +418,7 @@ class JmapSession:
         """POST method calls, retried while the server says it is only busy.
         Answers are matched to calls by call id, so each call needs its own."""
         raise_if_cancelled(cancelled)
+        _require_https(self._session.api_url)
         _check_calls(calls, self.is_writable)
         using = [CORE_URN, MAIL_URN]
         if any(call.method.startswith("EmailSubmission/") for call in calls):
@@ -436,7 +443,8 @@ class JmapSession:
         )
         for attempt in range(_MAX_ATTEMPTS):
             raise_if_cancelled(cancelled)
-            request = urllib.request.Request(
+            # S310: https-only, required above before anything goes out.
+            request = urllib.request.Request(  # noqa: S310
                 self._session.api_url, data=body, headers=headers, method="POST"
             )
             response = self._transport(request)
@@ -483,8 +491,10 @@ class JmapSession:
         """The bytes of one blob: a body part or attachment fetched by id."""
         raise_if_cancelled(cancelled)
         url = self._session.download_url(blob_id, name)
+        _require_https(url)
         _assert_same_origin(url, self._session.api_url)
-        request = urllib.request.Request(
+        # S310: https-only, required above before anything goes out.
+        request = urllib.request.Request(  # noqa: S310
             url,
             headers={"Authorization": self._authorization, "Accept": "*/*"},
         )
@@ -504,8 +514,10 @@ class JmapSession:
         if not self.is_writable:
             raise JmapError(0, CODE_READ_ONLY, "upload needs a writable session")
         url = self._session.upload_url()
+        _require_https(url)
         _assert_same_origin(url, self._session.api_url)
-        request = urllib.request.Request(
+        # S310: https-only, required above before anything goes out.
+        request = urllib.request.Request(  # noqa: S310
             url,
             data=data,
             headers={
@@ -544,8 +556,10 @@ class JmapSession:
         url = self._session.event_source_url(
             active.types, active.close_after, active.ping
         )
+        _require_https(url)
         _assert_same_origin(url, self._session.api_url)
-        request = urllib.request.Request(
+        # S310: https-only, required above before anything goes out.
+        request = urllib.request.Request(  # noqa: S310
             url,
             headers={
                 "Authorization": self._authorization,
@@ -744,6 +758,17 @@ def _checked_url(payload: dict, key: str, session_origin: tuple[str, str, int]) 
     return url
 
 
+def _require_https(url: str) -> None:
+    """Refuse a URL that would carry the credentials in the clear.
+
+    Discovery pins every URL to the session's https origin, so this only
+    trips on a tampered Session -- the same threat _assert_same_origin
+    guards against.
+    """
+    if urllib.parse.urlsplit(url).scheme.lower() != "https":
+        raise JmapError(0, CODE_BAD_SESSION, "the JMAP URL must use https")
+
+
 def _assert_same_origin(url: str, trusted: str) -> None:
     """Refuse a blob or push URL that left the api origin: discovery already
     checked the templates, so this only trips on a tampered Session."""
@@ -759,7 +784,11 @@ def urlopen_event_stream(
     """The event source for real, one line at a time. A blocking read cannot
     notice cancellation until the next line (or ping) arrives, so this runs on
     a thread the caller owns."""
-    with urllib.request.urlopen(request, timeout=NET_TIMEOUT_SECONDS) as reply:
+    # S310: https-only (required by the caller), and the context verifies
+    # rather than trusting the ambient default.
+    with urllib.request.urlopen(  # noqa: S310
+        request, timeout=NET_TIMEOUT_SECONDS, context=https_context()
+    ) as reply:
         for raw in reply:
             raise_if_cancelled(cancelled)
             yield raw.decode("utf-8", "replace")

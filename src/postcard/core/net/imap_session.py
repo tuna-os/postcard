@@ -146,10 +146,21 @@ class ImapSession:
     def connect(self) -> None:
         context = ssl_context_for(self._host)
         if self._security == "starttls":
-            self._imap = imaplib.IMAP4(
-                self._host, self._port, timeout=NET_TIMEOUT_SECONDS
-            )
-            self._imap.starttls(context)
+            imap = imaplib.IMAP4(self._host, self._port, timeout=NET_TIMEOUT_SECONDS)
+            self._imap = imap
+            try:
+                imap.starttls(context)
+            except Exception:
+                # Fail closed: a STARTTLS the server refused, or a handshake
+                # that failed (a wrong-host certificate among it), must never
+                # leave a plaintext session behind for sign_in to spill the
+                # password over. The original error propagates untouched, so
+                # errors.classify still words an ssl.SSLError as a
+                # secure-connection failure.
+                with suppress(Exception):
+                    imap.shutdown()
+                self._imap = None
+                raise
         else:
             self._imap = imaplib.IMAP4_SSL(
                 self._host,

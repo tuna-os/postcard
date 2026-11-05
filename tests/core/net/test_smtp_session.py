@@ -169,3 +169,69 @@ def test_connect_gives_starttls_a_verifying_context(monkeypatch):
 
     assert smtp.calls[0][0] == "starttls"
     _assert_verifies(smtp.calls[0][1])
+
+
+def test_a_wrong_host_certificate_fails_the_connection(monkeypatch):
+    # The server presents another host's certificate: verification raises,
+    # connect() lets it through, and the session stays unusable -- sign_in
+    # fails rather than sending the password anywhere.
+    def wrong_host(*args, **kwargs):
+        raise ssl.SSLCertVerificationError("certificate verify failed")
+
+    monkeypatch.setattr("postcard.core.net.smtp_session.smtplib.SMTP_SSL", wrong_host)
+
+    session = SmtpSession("smtp.example.com", 465)
+    with pytest.raises(ssl.SSLCertVerificationError):
+        session.connect()
+    with pytest.raises(SmtpError, match="not connected"):
+        session.sign_in(Credential("me@example.com", "hunter2"))
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        smtplib.SMTPException("STARTTLS extension not supported by server"),
+        ssl.SSLCertVerificationError("certificate verify failed"),
+    ],
+)
+def test_a_failed_starttls_leaves_no_usable_session(monkeypatch, failure):
+    # A server that refuses STARTTLS -- or whose handshake fails on a
+    # wrong-host certificate -- must never receive the password over the
+    # plaintext connection that remains. The original error propagates
+    # untouched, so errors.classify still words it.
+    smtp = FakeSmtp()
+
+    def starttls(context=None):
+        raise failure
+
+    smtp.starttls = starttls
+    closed = []
+    smtp.close = lambda: closed.append(True)
+    monkeypatch.setattr(
+        "postcard.core.net.smtp_session.smtplib.SMTP",
+        lambda *args, **kwargs: smtp,
+    )
+
+    session = SmtpSession("smtp.example.com", 587, "starttls")
+    with pytest.raises(type(failure)):
+        session.connect()
+    with pytest.raises(SmtpError, match="not connected"):
+        session.sign_in(Credential("me@example.com", "hunter2"))
+    assert smtp.calls == []
+    assert closed == [True]
+
+
+def test_loopback_uses_the_unverified_bridge_context(monkeypatch):
+    # The documented exception in ssl_context_for: a local bridge (ProtonMail
+    # Bridge, hydroxide) terminates TLS with a self-signed certificate, and
+    # there is no network path to attack between two local processes.
+    captured = {}
+    monkeypatch.setattr(
+        "postcard.core.net.smtp_session.smtplib.SMTP_SSL",
+        lambda *args, **kwargs: captured.update(kwargs) or FakeSmtp(),
+    )
+
+    SmtpSession("127.0.0.1", 465).connect()
+
+    assert captured["context"].verify_mode == ssl.CERT_NONE
+    assert not captured["context"].check_hostname
