@@ -52,3 +52,16 @@ def ssl_context_for(host: str) -> ssl.SSLContext:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     return context
+
+
+def https_context() -> ssl.SSLContext:
+    """The TLS context the HTTPS transports (Graph, JMAP) request with.
+
+    urllib verifies by default, but only through the ambient default context,
+    which any library in the process can replace with an unverified one. An
+    explicit context keeps a wrong-host certificate failing the connection no
+    matter what else ran first. Unlike ssl_context_for there is no loopback
+    exception here: neither transport serves a local bridge, so every request
+    verifies.
+    """
+    return ssl.create_default_context()

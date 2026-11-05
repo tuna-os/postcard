@@ -1,4 +1,6 @@
 import json
+import ssl
+import urllib.request
 
 import pytest
 
@@ -14,6 +16,7 @@ from postcard.core.net.graph_session import (
     quote_id,
     retry_delay,
     should_retry,
+    urlopen_transport,
     with_query,
 )
 
@@ -271,3 +274,75 @@ def test_ids_and_query_options_are_url_safe():
     assert with_query(
         "/m", top=50, orderby="receivedDateTime desc", select="id,subject"
     ) == ("/m?$top=50&$orderby=receivedDateTime%20desc&$select=id,subject")
+
+
+# --- TLS -------------------------------------------------------------------
+# Graph goes over urllib, whose verification comes from the ambient default
+# context unless the transport passes an explicit one. These tests pin both
+# halves: the transport verifies, and no absolute URL goes out with the token
+# unless it is https.
+
+
+class FakeReply:
+    """What urlopen returns: a status, headers and a body, as a context."""
+
+    status = 200
+    headers = {}
+
+    def read(self):
+        return b"{}"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def test_the_transport_verifies_certificates_by_default(monkeypatch):
+    # A wrong-host certificate fails the connection only when urlopen gets a
+    # verifying context: without one, an ambient unverified default elsewhere
+    # in the process would silently accept it.
+    captured = {}
+
+    def fake_urlopen(request, timeout=None, context=None):
+        captured["context"] = context
+        return FakeReply()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    urlopen_transport(urllib.request.Request(GRAPH_ROOT + "/me"))
+
+    assert captured["context"].check_hostname
+    assert captured["context"].verify_mode == ssl.CERT_REQUIRED
+
+
+def test_a_tls_failure_is_raised_not_retried_or_wrapped():
+    calls = []
+
+    def failing_transport(request):
+        calls.append(request)
+        raise ssl.SSLCertVerificationError("certificate verify failed")
+
+    with pytest.raises(ssl.SSLCertVerificationError):
+        session(failing_transport).get("/me")
+
+    assert len(calls) == 1
+
+
+def test_a_plain_http_url_never_receives_the_token():
+    transport = FakeTransport(reply(body={}))
+
+    with pytest.raises(GraphError, match="without https"):
+        session(transport).get("http://evil.example/inbox")
+
+    assert transport.requests == []
+
+
+def test_upload_refuses_a_plain_http_url():
+    transport = FakeTransport(Response(200))
+
+    with pytest.raises(GraphError, match="without https"):
+        session(transport).upload("http://evil.example/upload", b"x")
+
+    assert transport.requests == []

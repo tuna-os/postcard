@@ -43,7 +43,8 @@ FASTMAIL_AUTHORIZE_URL = "https://api.fastmail.com/oauth/authorize"
 
 # The one token endpoint serves both the code exchange and the refresh; the
 # grant_type tells them apart.
-FASTMAIL_TOKEN_URL = "https://api.fastmail.com/oauth/refresh"
+# A URL constant, not a credential: the name only trips S105's token match.
+FASTMAIL_TOKEN_URL = "https://api.fastmail.com/oauth/refresh"  # noqa: S105
 
 # Where a Bearer [REDACTED] lands: the JMAP session resource. Sent as the RFC 8707
 # resource indicator on the authorize URL -- without it the endpoint answers

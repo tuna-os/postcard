@@ -1,5 +1,6 @@
 import logging
 import smtplib
+from contextlib import suppress
 
 from . import NET_TIMEOUT_SECONDS, ssl_context_for
 from .auth import MECHANISM_LOGIN, MECHANISM_XOAUTH2, Credential, xoauth2_response
@@ -55,10 +56,21 @@ class SmtpSession:
     def connect(self) -> None:
         context = ssl_context_for(self._host)
         if self._security == "starttls":
-            self._smtp = smtplib.SMTP(
-                self._host, self._port, timeout=NET_TIMEOUT_SECONDS
-            )
-            self._smtp.starttls(context=context)
+            smtp = smtplib.SMTP(self._host, self._port, timeout=NET_TIMEOUT_SECONDS)
+            self._smtp = smtp
+            try:
+                smtp.starttls(context=context)
+            except Exception:
+                # Fail closed: a STARTTLS the server refused, or a handshake
+                # that failed (a wrong-host certificate among it), must never
+                # leave a plaintext session behind for sign_in to spill the
+                # password over. The original error propagates untouched, so
+                # errors.classify still words an ssl.SSLError as a
+                # secure-connection failure.
+                with suppress(Exception):
+                    smtp.close()
+                self._smtp = None
+                raise
         else:
             self._smtp = smtplib.SMTP_SSL(
                 self._host, self._port, timeout=NET_TIMEOUT_SECONDS, context=context

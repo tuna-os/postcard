@@ -2,7 +2,9 @@ import base64
 import dataclasses
 import json
 import logging
+import ssl
 import threading
+import urllib.request
 
 import pytest
 
@@ -33,6 +35,8 @@ from postcard.core.net.jmap_session import (
     parse_state_changes,
     reconnect_delay,
     result_or_raise,
+    urlopen_event_stream,
+    urlopen_transport,
 )
 
 SESSION_URL = "https://jmap.example.com/.well-known/jmap"
@@ -193,8 +197,12 @@ def test_a_download_template_outside_the_session_is_refused():
 
 
 def test_a_session_url_without_tls_is_refused():
+    transport = FakeTransport(session_body())
+
     with pytest.raises(JmapError, match="must use https"):
-        discover("http://jmap.example.com/.well-known/jmap", PASSWORD)
+        discover("http://jmap.example.com/.well-known/jmap", PASSWORD, transport)
+
+    assert transport.requests == []
 
 
 def test_a_template_without_its_variables_is_refused():
@@ -930,4 +938,126 @@ def test_a_cancelled_watch_never_opens_the_stream():
         jmap.watch_push(stream, lambda _c: None, cancelled, quiet_config())
 
     assert raised.value.code == CODE_CANCELLED
+    assert opened == []
+
+
+# --- TLS -------------------------------------------------------------------
+# Like Graph, JMAP goes over urllib with an explicit verifying context, and
+# every URL the credentials go to must be https. Discovery pins the URLs to
+# the session's https origin; the session rechecks each one before use, so a
+# tampered Session still cannot put the credentials on a plaintext wire.
+
+
+class FakeReply:
+    """What urlopen returns: a status, headers and a body, as a context."""
+
+    status = 200
+    headers = {}
+
+    def read(self):
+        return b"{}"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def test_the_transport_verifies_certificates_by_default(monkeypatch):
+    # A wrong-host certificate fails the connection only when urlopen gets a
+    # verifying context: without one, an ambient unverified default elsewhere
+    # in the process would silently accept it.
+    captured = {}
+
+    def fake_urlopen(request, timeout=None, context=None):
+        captured["context"] = context
+        return FakeReply()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    urlopen_transport(urllib.request.Request(API_URL))
+
+    assert captured["context"].check_hostname
+    assert captured["context"].verify_mode == ssl.CERT_REQUIRED
+
+
+def test_the_event_stream_verifies_certificates_by_default(monkeypatch):
+    captured = {}
+
+    class FakeStreamReply(FakeReply):
+        def __iter__(self):
+            return iter([b": ping\n\n"])
+
+    def fake_urlopen(request, timeout=None, context=None):
+        captured["context"] = context
+        return FakeStreamReply()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    request = urllib.request.Request("https://jmap.example.com/jmap/eventsource")
+    assert list(urlopen_event_stream(request)) == [": ping\n\n"]
+    assert captured["context"].check_hostname
+    assert captured["context"].verify_mode == ssl.CERT_REQUIRED
+
+
+def test_a_tls_failure_is_raised_not_retried_or_wrapped():
+    calls = []
+
+    def failing_transport(request):
+        calls.append(request)
+        raise ssl.SSLCertVerificationError("certificate verify failed")
+
+    jmap = JmapSession(discovered_session(), PASSWORD, failing_transport)
+    with pytest.raises(ssl.SSLCertVerificationError):
+        jmap.request([JmapCall("Email/query", {})])
+
+    assert len(calls) == 1
+
+
+def test_a_request_to_a_plain_http_api_url_is_refused():
+    # Discovery pins apiUrl to https; this only trips on a tampered Session.
+    tampered = dataclasses.replace(
+        discovered_session(), api_url="http://evil.example/jmap/api/"
+    )
+    transport = FakeTransport(
+        reply(body={"methodResponses": [["Email/query", {}, "0"]]})
+    )
+    jmap = JmapSession(tampered, PASSWORD, transport)
+
+    with pytest.raises(JmapError, match="must use https"):
+        jmap.request([JmapCall("Email/query", {})])
+
+    assert transport.requests == []
+
+
+def test_blob_and_push_urls_must_stay_on_https():
+    tampered = dataclasses.replace(
+        discovered_session(),
+        api_url="http://evil.example/jmap/api/",
+        download_template=(
+            "http://evil.example/jmap/download/{accountId}/{blobId}/{name}"
+        ),
+        upload_template="http://evil.example/jmap/upload/{accountId}/",
+        event_source_template=(
+            "http://evil.example/jmap/eventsource/"
+            "?types={types}&closeafter={closeafter}&ping={ping}"
+        ),
+    )
+    transport = FakeTransport()
+    jmap = JmapSession(tampered, PASSWORD, transport, writable=True)
+    opened = []
+
+    def stream(request, _cancelled):
+        opened.append(request)
+        yield ""
+
+    with pytest.raises(JmapError, match="must use https"):
+        jmap.download_blob("B1", "n.txt")
+    with pytest.raises(JmapError, match="must use https"):
+        jmap.upload_blob(b"data")
+    with pytest.raises(JmapError, match="must use https"):
+        jmap.watch_push(stream, lambda _c: None, None, quiet_config())
+
+    assert transport.requests == []
     assert opened == []

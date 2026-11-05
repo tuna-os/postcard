@@ -14,7 +14,7 @@ import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 
-from . import NET_TIMEOUT_SECONDS
+from . import NET_TIMEOUT_SECONDS, https_context
 from .auth import MECHANISM_XOAUTH2, Credential
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,12 @@ def urlopen_transport(request: urllib.request.Request) -> Response:
     """Send a request for real. An HTTP error status is returned, not raised,
     so retrying and error parsing live in one place."""
     try:
-        with urllib.request.urlopen(request, timeout=NET_TIMEOUT_SECONDS) as reply:
+        # S310: every URL is https-only (absolute ones are refused unless
+        # https), and the context verifies rather than trusting the ambient
+        # default.
+        with urllib.request.urlopen(  # noqa: S310
+            request, timeout=NET_TIMEOUT_SECONDS, context=https_context()
+        ) as reply:
             return Response(reply.status, reply.read(), dict(reply.headers))
     except urllib.error.HTTPError as error:
         return Response(error.code, error.read(), dict(error.headers))
@@ -121,6 +126,19 @@ def with_query(path: str, **params: str | int) -> str:
         safe="$,",
     )
     return f"{path}?{query}" if query else path
+
+
+def _refuse_plaintext_url(url: str, method: str) -> None:
+    """Refuse an absolute URL that is not https, before anything goes out.
+
+    Relative paths pass (they join GRAPH_ROOT); an absolute plain-http URL is
+    tampering or a bug, and either way neither the token nor message bytes
+    are sent over it.
+    """
+    target = urllib.parse.urlsplit(url)
+    if target.scheme and target.scheme.lower() != "https":
+        host = target.hostname or target.scheme
+        raise GraphError(0, "insecureUrl", f"refused {method} {host} without https")
 
 
 def error_from(response: Response) -> GraphError:
@@ -180,6 +198,7 @@ class GraphSession:
     ) -> Response:
         """One request, retried while Graph says it is only busy. Raises
         GraphError for any other error status."""
+        _refuse_plaintext_url(path, method)
         url = path if path.startswith("https://") else GRAPH_ROOT + path
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -189,7 +208,9 @@ class GraphSession:
             headers["Content-Type"] = content_type
 
         for attempt in range(_MAX_ATTEMPTS):
-            request = urllib.request.Request(
+            # S310: https-only -- relative paths join GRAPH_ROOT above, and
+            # absolute ones were refused unless https.
+            request = urllib.request.Request(  # noqa: S310
                 url, data=body, headers=headers, method=method
             )
             response = self._transport(request)
@@ -295,11 +316,13 @@ class GraphSession:
         The session URL carries its own authorization, and Graph rejects a PUT
         that also sends the bearer token, so this bypasses request().
         """
+        _refuse_plaintext_url(upload_url, "PUT")
         total = len(data)
         for start in range(0, total, UPLOAD_CHUNK_BYTES):
             chunk = data[start : start + UPLOAD_CHUNK_BYTES]
             end = start + len(chunk) - 1
-            request = urllib.request.Request(
+            # S310: https-only, refused unless https above.
+            request = urllib.request.Request(  # noqa: S310
                 upload_url,
                 data=chunk,
                 method="PUT",
