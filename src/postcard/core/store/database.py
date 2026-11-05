@@ -49,6 +49,13 @@ class CacheError(Exception):
 # either already encrypted or not a database at all.
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
+# The SQLCipher 4.x cipher suite the cache is pinned to, read back after every
+# open. A raw hex key bypasses PBKDF2, but pinning the suite explicitly keeps
+# new files on it even if a provider's defaults ever drift.
+_KDF_ITERATIONS = 256000
+_KDF_ALGORITHM = "PBKDF2_HMAC_SHA512"
+_HMAC_ALGORITHM = "HMAC_SHA512"
+
 # Every column _email_from_row reads
 _EMAIL_COLUMNS = """
     id, folder_id, server_id, sender, sender_address, recipient,
@@ -264,16 +271,46 @@ def _verify_encrypted(path: str, key: bytes, version: int) -> None:
         raise CacheError("migration_failed")
 
 
+def _assert_cipher_suite(conn) -> None:
+    """Fail closed unless the connection runs the pinned cipher suite.
+
+    This reads back what the provider accepted, not what the file demands: a
+    wrong key or a tampered page already fails the probe query above, while a
+    drifted default fails here instead of silently minting new files under
+    unknown crypto.
+    """
+    pinned = {
+        "kdf_iter": str(_KDF_ITERATIONS),
+        "cipher_kdf_algorithm": _KDF_ALGORITHM,
+        "cipher_hmac_algorithm": _HMAC_ALGORITHM,
+        "cipher_memory_security": "1",
+    }
+    for pragma, expected in pinned.items():
+        found = conn.execute(f"PRAGMA {pragma}").fetchone()[0]
+        if str(found) != expected:
+            logger.warning("unexpected %s %r for the mail cache", pragma, found)
+            raise CacheError("unlock_failed")
+
+
 def _open_encrypted(path: str, key: bytes):
     """Open an encrypted database, failing closed on a wrong key or damage."""
     if _sqlcipher is None:
         raise CacheError("crypto_unavailable")
     conn = _sqlcipher.connect(path)
     conn.execute(f"PRAGMA key = \"x'{key.hex()}'\"")
+    # Derivation-affecting settings only take before the key is first used,
+    # so they come here, ahead of the probe query.
+    conn.execute(f"PRAGMA kdf_iter = {_KDF_ITERATIONS:d}")
+    conn.execute(f"PRAGMA cipher_kdf_algorithm = {_KDF_ALGORITHM}")
+    conn.execute(f"PRAGMA cipher_hmac_algorithm = {_HMAC_ALGORITHM}")
+    conn.execute("PRAGMA cipher_memory_security = ON")
     try:
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        _assert_cipher_suite(conn)
     except Exception as error:
         conn.close()
+        if isinstance(error, CacheError):
+            raise
         raise CacheError("unlock_failed") from error
     conn.row_factory = _sqlcipher.Row
     return conn
@@ -350,7 +387,11 @@ class Database:
         # A sync commits once per message it stores, and the default journal
         # fsyncs on every one of those. Under WAL a commit is an append, and
         # NORMAL leaves the fsync to the checkpoint -- the durability given up
-        # is the last few seconds of a mailbox the server still has.
+        # is the last few seconds of a mailbox the server still has. WAL stays
+        # on for encrypted caches too: SQLCipher encrypts the -wal frames with
+        # the same key, so the sidecars hold ciphertext, never plaintext, and
+        # the FTS index is ordinary tables inside the main file, not a sidecar.
+        # close() checkpoints so nothing lingers beside the file afterwards.
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA synchronous = NORMAL")
         self._conn.execute("PRAGMA foreign_keys = ON")
@@ -371,6 +412,10 @@ class Database:
             restrict_cache_permissions(path)
 
     def close(self) -> None:
+        # Fold the WAL back into the file so no mail lingers in a sidecar
+        # after close; a failed checkpoint must never stop the close itself.
+        with suppress(Exception):
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._conn.close()
 
     def _create_tables(self) -> None:
