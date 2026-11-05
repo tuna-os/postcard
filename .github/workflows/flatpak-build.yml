@@ -71,6 +71,17 @@ jobs:
           # A container has no machine-id (dbus won't start) and no /dev/fuse.
           tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
 
+      # The builder image carries the SDK and Platform but not the manifest's
+      # sdk-extensions (rust-stable, golang): without this step the build
+      # fails with "extension ... not installed". Same command `just init`
+      # runs; the build dir need not exist for --install-deps-only.
+      - name: Install the SDK extensions the manifest needs
+        run: |
+          flatpak remote-add --if-not-exists --user \
+            flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak-builder --install-deps-from=flathub --install-deps-only \
+            --user build in.gxanshu.postcard.json
+
       # Release-only: PR callers pass no secrets, so this step never executes
       # on the PR path. The key id is public, but secrets is the only channel
       # a caller can use to pass a secret-sourced value.
