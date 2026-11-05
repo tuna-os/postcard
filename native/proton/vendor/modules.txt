@@ -1,0 +1,143 @@
+# github.com/ProtonMail/bcrypt v0.0.0-20211005172633-e235017c1baf
+## explicit; go 1.17
+github.com/ProtonMail/bcrypt
+# github.com/ProtonMail/gluon v0.13.1-0.20221025093924-86bbf0261eb8
+## explicit; go 1.18
+github.com/ProtonMail/gluon/logging
+github.com/ProtonMail/gluon/queue
+github.com/ProtonMail/gluon/rfc822
+# github.com/ProtonMail/go-crypto v0.0.0-20220824120805-4b6e5c587895
+## explicit; go 1.13
+github.com/ProtonMail/go-crypto/bitcurves
+github.com/ProtonMail/go-crypto/brainpool
+github.com/ProtonMail/go-crypto/eax
+github.com/ProtonMail/go-crypto/internal/byteutil
+github.com/ProtonMail/go-crypto/ocb
+github.com/ProtonMail/go-crypto/openpgp
+github.com/ProtonMail/go-crypto/openpgp/aes/keywrap
+github.com/ProtonMail/go-crypto/openpgp/armor
+github.com/ProtonMail/go-crypto/openpgp/clearsign
+github.com/ProtonMail/go-crypto/openpgp/ecdh
+github.com/ProtonMail/go-crypto/openpgp/ecdsa
+github.com/ProtonMail/go-crypto/openpgp/eddsa
+github.com/ProtonMail/go-crypto/openpgp/elgamal
+github.com/ProtonMail/go-crypto/openpgp/errors
+github.com/ProtonMail/go-crypto/openpgp/internal/algorithm
+github.com/ProtonMail/go-crypto/openpgp/internal/ecc
+github.com/ProtonMail/go-crypto/openpgp/internal/encoding
+github.com/ProtonMail/go-crypto/openpgp/packet
+github.com/ProtonMail/go-crypto/openpgp/s2k
+# github.com/ProtonMail/go-mime v0.0.0-20220429130430-2192574d760f
+## explicit; go 1.12
+github.com/ProtonMail/go-mime
+# github.com/ProtonMail/go-proton-api v0.4.0
+## explicit; go 1.18
+github.com/ProtonMail/go-proton-api
+# github.com/ProtonMail/go-srp v0.0.5
+## explicit; go 1.12
+github.com/ProtonMail/go-srp
+# github.com/ProtonMail/gopenpgp/v2 v2.4.10
+## explicit; go 1.15
+github.com/ProtonMail/gopenpgp/v2/armor
+github.com/ProtonMail/gopenpgp/v2/constants
+github.com/ProtonMail/gopenpgp/v2/crypto
+github.com/ProtonMail/gopenpgp/v2/internal
+# github.com/PuerkitoBio/goquery v1.8.0
+## explicit; go 1.13
+github.com/PuerkitoBio/goquery
+# github.com/andybalholm/cascadia v1.3.1
+## explicit; go 1.16
+github.com/andybalholm/cascadia
+# github.com/bradenaw/juniper v0.8.0
+## explicit; go 1.18
+github.com/bradenaw/juniper/container/xheap
+github.com/bradenaw/juniper/internal/heap
+github.com/bradenaw/juniper/iterator
+github.com/bradenaw/juniper/parallel
+github.com/bradenaw/juniper/stream
+github.com/bradenaw/juniper/xmath
+github.com/bradenaw/juniper/xslices
+github.com/bradenaw/juniper/xsort
+# github.com/cloudflare/circl v1.2.0
+## explicit; go 1.16
+github.com/cloudflare/circl/dh/x25519
+github.com/cloudflare/circl/dh/x448
+github.com/cloudflare/circl/ecc/goldilocks
+github.com/cloudflare/circl/internal/conv
+github.com/cloudflare/circl/internal/sha3
+github.com/cloudflare/circl/math
+github.com/cloudflare/circl/math/fp25519
+github.com/cloudflare/circl/math/fp448
+github.com/cloudflare/circl/math/mlsbset
+github.com/cloudflare/circl/sign
+github.com/cloudflare/circl/sign/ed25519
+github.com/cloudflare/circl/sign/ed448
+# github.com/cronokirby/saferith v0.33.0
+## explicit; go 1.15
+github.com/cronokirby/saferith
+# github.com/emersion/go-message v0.16.0
+## explicit; go 1.14
+github.com/emersion/go-message
+github.com/emersion/go-message/textproto
+# github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594
+## explicit
+github.com/emersion/go-textwrapper
+# github.com/emersion/go-vcard v0.0.0-20220507122617-d4056df0ec4a
+## explicit; go 1.13
+github.com/emersion/go-vcard
+# github.com/go-resty/resty/v2 v2.7.0
+## explicit; go 1.11
+github.com/go-resty/resty/v2
+# github.com/google/uuid v1.3.0
+## explicit
+github.com/google/uuid
+# github.com/pkg/errors v0.9.1
+## explicit
+github.com/pkg/errors
+# github.com/sirupsen/logrus v1.8.1
+## explicit; go 1.13
+github.com/sirupsen/logrus
+# golang.org/x/crypto v0.0.0-20220829220503-c86fa9a7ed90
+## explicit; go 1.17
+golang.org/x/crypto/argon2
+golang.org/x/crypto/blake2b
+golang.org/x/crypto/cast5
+golang.org/x/crypto/curve25519
+golang.org/x/crypto/curve25519/internal/field
+# golang.org/x/exp v0.0.0-20220827204233-334a2380cb91
+## explicit; go 1.18
+golang.org/x/exp/constraints
+golang.org/x/exp/slices
+# golang.org/x/net v0.0.0-20220826154423-83b083e8dc8b
+## explicit; go 1.17
+golang.org/x/net/html
+golang.org/x/net/html/atom
+golang.org/x/net/publicsuffix
+# golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
+## explicit
+golang.org/x/sync/errgroup
+# golang.org/x/sys v0.0.0-20220829200755-d48e67d00261
+## explicit; go 1.17
+golang.org/x/sys/cpu
+golang.org/x/sys/internal/unsafeheader
+golang.org/x/sys/unix
+golang.org/x/sys/windows
+# golang.org/x/text v0.3.7
+## explicit; go 1.17
+golang.org/x/text/encoding
+golang.org/x/text/encoding/charmap
+golang.org/x/text/encoding/htmlindex
+golang.org/x/text/encoding/internal
+golang.org/x/text/encoding/internal/identifier
+golang.org/x/text/encoding/japanese
+golang.org/x/text/encoding/korean
+golang.org/x/text/encoding/simplifiedchinese
+golang.org/x/text/encoding/traditionalchinese
+golang.org/x/text/encoding/unicode
+golang.org/x/text/internal/language
+golang.org/x/text/internal/language/compact
+golang.org/x/text/internal/tag
+golang.org/x/text/internal/utf8internal
+golang.org/x/text/language
+golang.org/x/text/runes
+golang.org/x/text/transform
