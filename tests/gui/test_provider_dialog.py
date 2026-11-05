@@ -42,6 +42,7 @@ def _register_resources():
 _register_resources()
 
 from postcard.account_dialog import PostcardAccountDialog  # noqa: E402
+from postcard.core.net import proton_session  # noqa: E402
 from postcard.core.providers.catalog import PROVIDERS  # noqa: E402
 from postcard.core.store.database import Database  # noqa: E402
 from postcard.fastmail_dialog import PostcardFastmailDialog  # noqa: E402
@@ -118,12 +119,17 @@ def test_oauth_rows_carry_the_browser_mark(tmp_path):
     db.close()
 
 
-def test_gated_rows_stay_visible_but_insensitive(tmp_path):
+def test_gated_rows_stay_visible_but_insensitive(monkeypatch, tmp_path):
     db = Database(str(tmp_path / "postcard.db"), key=_KEY)
+    # Hermetic: pin every gate closed rather than assuming what ships.
+    monkeypatch.setattr("postcard.core.net.ms_oauth.MS_CLIENT_ID", "")
+    monkeypatch.setattr("postcard.core.net.fastmail_oauth.FASTMAIL_CLIENT_ID", "")
+    monkeypatch.setattr(
+        "postcard.core.net.proton_session.helper_available", lambda: False
+    )
     rows = _rows(PostcardProviderDialog(db))
 
-    # No client ids ship and no Proton helper is installed, so the gated
-    # rows explain themselves instead of hiding; the rest are live.
+    # The gated rows explain themselves instead of hiding; the rest are live.
     for icon in (
         "postcard-provider-microsoft",
         "postcard-provider-fastmail",
@@ -163,6 +169,17 @@ def test_an_installed_helper_enables_the_proton_row(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "postcard.core.net.proton_session.helper_available", lambda: True
     )
+    rows = _rows(PostcardProviderDialog(db))
+    assert _row_by_icon(rows, "postcard-provider-proton").get_sensitive()
+
+    db.close()
+
+
+def test_the_shipped_helper_lights_the_proton_row(tmp_path):
+    # No patches: inside the sandbox the helper ships, so the row is live.
+    # Fails if the helper ever stops shipping.
+    db = Database(str(tmp_path / "postcard.db"), key=_KEY)
+    assert proton_session.helper_available()
     rows = _rows(PostcardProviderDialog(db))
     assert _row_by_icon(rows, "postcard-provider-proton").get_sensitive()
 
