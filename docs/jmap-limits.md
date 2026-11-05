@@ -86,6 +86,17 @@ after 5 consecutive failures it raises `pushUnavailable` and the caller polls
 instead. Cancellation stops between every chunk. A malformed event is logged
 and skipped — the next sync reconciles whatever it announced.
 
+## OAuth scopes (verified live)
+
+The native Fastmail flow requests `urn:ietf:params:oauth:scope:mail` plus
+`offline_access`, and nothing else. Per the OAuth Profile for Open Public
+Clients (§5.4.1) the mail scope covers the JMAP `core`, `mail` and
+`submission` capabilities the backend needs; `offline_access` buys the
+refresh token. The per-protocol `urn:ietf:params:jmap:*` URNs are not
+requested: the live registration endpoint refuses them with
+`invalid_client_metadata`, and the live authorization-server metadata
+does not advertise them.
+
 ## Live-interop limits
 
 - Fastmail: discovery plus `Mailbox/get` runs against the live API in
